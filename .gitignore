@@ -1,0 +1,16 @@
+.env
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+.sync-state.sqlite3
+.sync-state.sqlite3-shm
+.sync-state.sqlite3-wal
+.sync-state.sqlite3.lock
+dist/
+build/
+*.egg-info/
+reports/
+logs/
+config.yaml
+.pytest_cache/
