@@ -88,3 +88,7 @@ For new ideas, include:
 
 If you find a security issue, do not post sensitive details publicly first.
 Open a minimal issue asking for a private contact path.
+
+Maintainer contact:
+- GitHub: `@diyanko`
+- Preferred first contact: a GitHub issue in this repository

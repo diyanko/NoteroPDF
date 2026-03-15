@@ -233,3 +233,15 @@ noteropdf
 CI runs:
 - tests (`pytest`)
 - package build smoke check (`python -m build`)
+
+## License
+
+This project is licensed under the MIT License.
+See `LICENSE` for details.
+
+## Contact
+
+Maintainer: GitHub `@diyanko`
+
+If you need help or want to report a bug, open an issue in this repository.
+For sensitive security reports, open a minimal issue requesting a private contact channel.
