@@ -1,244 +1,272 @@
 # NoteroPDF
 
-NoteroPDF helps you put the right PDF from your Zotero library into the right row in your Notion database.
+*Sync PDFs from Zotero to your Notion database.*
 
-It is designed to be safe and predictable:
-- It never edits Zotero.
-- It reads Zotero in read-only mode.
-- It only writes to one Notion property (default: `PDF`).
-- If matching is unclear, it skips and reports the reason.
-- It syncs only your personal Zotero library (group libraries are ignored in v1).
-- It supports macOS in this public v1 release.
+---
 
-## Safety promise
+NoteroPDF helps you attach the correct PDFs from your Zotero library to the corresponding rows in your Notion database. It is designed to be safe, read-only, and predictable.
 
-What this app can change:
-- One Notion files field (default: `PDF`) in matched rows.
+**Note:** NoteroPDF works alongside the official [Notero](https://github.com/dvanoni/notero) plugin for Zotero. While Notero syncs metadata (titles, authors, notes), NoteroPDF specifically handles syncing the **PDF files** themselves to your Notion "Files & media" property.
 
-What this app cannot change:
-- Zotero database content
-- Zotero files on disk
-- Other Notion fields
-- Other Notion databases
+---
 
-If matching is unclear, it skips the item and tells you why.
+## Quick Overview
 
-## Who this is for
+**What it does:**
+- Finds local PDF attachments in your Zotero library
+- Matches them to the correct rows in your Notion database
+- Uploads and attaches the PDFs to your Notion "PDF" property
 
-Use this if:
-- You already use Notero.
-- Your Notion rows already exist.
-- You want a simple, reliable CLI sync now, and maybe a GUI later.
+**Key Features:**
+- **Safe:** Never edits Zotero; runs in read-only mode
+- **Precise:** Uses strict matching rules (Notero links, URIs, DOIs) to avoid mistakes
+- **Transparent:** Generates detailed CSV/JSON reports after every run
+- **Simple:** Command-line interface that is easy to set up
 
-## What it does
+**Who is this for:**
+- Users who already use Notero to sync metadata to Notion
+- Users whose Notion database rows already exist (created by Notero)
+- Users who want to attach the actual PDF files to those Notion rows
 
-For each Zotero parent item:
-1. Finds exactly one local PDF attachment.
-2. Finds the matching Notion row using strict rules.
-3. Uploads and attaches the PDF to your Notion `PDF` property.
-4. Writes clear logs and reports.
+---
 
-If anything is ambiguous (no PDF, multiple PDFs, multiple Notion matches), it skips that item and records why.
+## Prerequisites
 
-## Matching rules (strict)
+Before you start, make sure you have:
 
-Order used:
-1. Notero page link on the Zotero item.
-2. Exact match on Notion `Zotero URI` property.
-3. Exact match on Notion `DOI` property (if present).
-4. Otherwise skipped as no confident match.
+- [ ] Python 3.11+ installed on your computer
+- [ ] Zotero installed with your library data
+- [ ] Notion account with a database set up (using Notero)
+- [ ] Notion Internal Integration Token (secret key)
+- [ ] A **Files & media** property named "PDF" (or custom name) in your Notion database
+- [ ] macOS (v1 currently supports macOS only)
 
-No fuzzy title matching is used.
+---
 
-## Before you start
+## Installation
 
-You need:
-- Python 3.11+
-- A Notion internal integration token
-- Access to your target Notion database/data source
-- Local Zotero data directory
-- macOS
+### Option 1: Install from Latest Release (Recommended)
 
-## Install from a release
-
-For public releases (example: `v0.1.0`), use one of these options.
-
-Install from wheel asset:
+This command automatically fetches the latest release version and installs it:
 
 ```bash
-python -m pip install "https://github.com/diyanko/NoteroPDF/releases/download/v0.1.0/noteropdf-0.1.0-py3-none-any.whl"
+LATEST_TAG=$(curl -s https://api.github.com/repos/diyanko/NoteroPDF/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') && \
+python -m pip install "https://github.com/diyanko/NoteroPDF/releases/download/${LATEST_TAG}/noteropdf-${LATEST_TAG#v}-py3-none-any.whl"
 ```
 
-Install from source archive:
+### Option 2: Install from Source (Latest)
+
+This command automatically fetches the latest release version and installs from source:
 
 ```bash
-python -m pip install "https://github.com/diyanko/NoteroPDF/archive/refs/tags/v0.1.0.tar.gz"
+LATEST_TAG=$(curl -s https://api.github.com/repos/diyanko/NoteroPDF/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/') && \
+python -m pip install "https://github.com/diyanko/NoteroPDF/archive/refs/tags/${LATEST_TAG}.tar.gz"
 ```
 
-After install, run:
+### Verify Installation
+
+Run the help command to ensure it is installed correctly:
 
 ```bash
 noteropdf --help
 ```
 
-## Quick setup
+---
 
-1. Install dependencies:
+## Notion Database Setup
 
-```bash
-python -m pip install -r requirements.txt
+Before configuring NoteroPDF, you need to ensure your Notion database has a property for storing PDF files.
+
+### Creating a PDF Property in Notion
+
+1. Open your Notion database that syncs with Notero
+2. Click the **"+ New property"** button at the end of the property list
+3. Set the property details:
+   - **Property name:** `PDF` (or whatever you prefer, but update `config.yaml` accordingly)
+   - **Property type:** **"Files & media"**
+4. Click **"Create"** to save the property
+
+**Note:** The property type must be **"Files & media"** for NoteroPDF to attach PDF files to your database rows.
+
+### Property Name Configuration
+
+In your `config.yaml`, the `pdf_property_name` setting must match the name of your Notion property exactly:
+
+```yaml
+notion:
+  pdf_property_name: "PDF"  # Must match your Notion property name
 ```
 
-2. Create env file:
+If you named your property something different (e.g., "PDF Attachments"), update the configuration accordingly.
+
+---
+
+## Configuration
+
+### 1. Set up Environment Variables
+
+Copy the example environment file and add your Notion token:
 
 ```bash
 cp .env.example .env
 ```
 
-3. Put your Notion token in `.env`:
+Edit `.env` and add your Notion token:
 
 ```env
 NOTION_TOKEN=secret_xxx
 ```
 
-4. Create config:
+### 2. Configure Settings
+
+Copy the example config file:
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-5. Edit `config.yaml`:
-- Set your Zotero paths.
-- Set your Notion database/data source IDs.
-- Keep `notion_version: "2026-03-11"`.
-- Keep `pdf_property_name` and `zotero_uri_property_name` as different fields.
+Edit `config.yaml` with your specific paths and IDs:
 
-## First run (safe path)
+```yaml
+zotero:
+  data_dir: "/Users/your-username/Zotero"
+  sqlite_path: "/Users/your-username/Zotero/zotero.sqlite"
+  storage_dir: "/Users/your-username/Zotero/storage"
 
-1. Check setup first:
+notion:
+  token_env: "NOTION_TOKEN"
+  database_id: "your-notion-database-id"
+  data_source_id: "your-data-source-id"  # Optional but recommended
+  pdf_property_name: "PDF"  # Name of your Notion files property
+  zotero_uri_property_name: "Zotero URI"
+
+sync:
+  dry_run: true  # Start with dry run for safety
+  state_db_path: ".sync-state.sqlite3"
+```
+
+**Important:** Keep `notion_version: "2026-03-11"` as is.
+
+---
+
+## Usage
+
+### Step-by-Step Guide
+
+**Step 1: Verify Setup**
+
+Run the doctor command to check everything is configured correctly:
 
 ```bash
 python -m noteropdf doctor
 ```
 
-`doctor` confirms:
+This checks:
 - Paths are valid
 - Notion access works
 - Target field exists and is the correct type
-- Zotero is accessed in immutable read-only mode
 
-2. Preview changes without writing to Notion:
+**Step 2: Preview Changes (Dry Run)**
 
-Set this in `config.yaml`:
-
-```yaml
-sync:
-  dry_run: true
-```
+Set `dry_run: true` in `config.yaml` (default) and run:
 
 ```bash
 python -m noteropdf sync
 ```
 
-3. If the report looks correct, run real sync:
+This simulates the sync without actually uploading files. Review the report in `reports/`.
 
-Set `dry_run: false` in `config.yaml`, then run:
+**Step 3: Run Real Sync**
 
-```bash
-python -m noteropdf sync
-```
-
-By default, the app stops on the first error so problems are easy to see and fix.
-
-Before each write command, the CLI prints a preflight summary:
-- what command is running
-- which Notion property may be changed
-- how many items/pages are in scope
-- whether dry-run is enabled
-
-## Main commands
-
-Check setup and access:
-
-```bash
-python -m noteropdf doctor
-```
-
-Run normal sync (uploads only needed files):
+If everything looks correct, set `dry_run: false` in `config.yaml` and run:
 
 ```bash
 python -m noteropdf sync
 ```
 
-Force re-upload everything (use only if needed):
+### Main Commands
 
-```bash
-python -m noteropdf sync --force
-```
+| Command | Description |
+|---------|-------------|
+| `python -m noteropdf doctor` | Verify setup and access |
+| `python -m noteropdf sync` | Normal sync (uploads only needed files) |
+| `python -m noteropdf sync --force` | Force re-upload everything |
+| `python -m noteropdf rebuild-page-files --yes` | Clear PDF values and rebuild from local files |
+| `python -m noteropdf full-reset --yes` | Clear PDF values and local sync state (destructive) |
 
-Clear known `PDF` values and rebuild from local files:
+---
 
-```bash
-python -m noteropdf rebuild-page-files --yes
-```
+## Understanding Results
 
-Clear known `PDF` values and local sync state (destructive):
+### Status Codes
 
-```bash
-python -m noteropdf full-reset --yes
-```
+| Status | Meaning |
+|--------|---------|
+| `OK` | Upload and attach succeeded |
+| `UNCHANGED` | Already up to date, no upload needed |
+| `NO_PDF` | No valid PDF found |
+| `MULTIPLE_PDFS` | More than one valid PDF found |
+| `NO_NOTION_MATCH` | No exact Notion match found |
+| `MULTIPLE_NOTION_MATCHES` | More than one Notion row matched |
+| `FILE_TOO_LARGE` | File exceeds configured upload limit |
+| `UPLOAD_FAILED` / `ATTACH_FAILED` | Notion upload/attach issue |
 
-For both destructive commands, you must also type a second confirmation in the terminal.
+### Reports
 
-## Read results quickly
+After each run, check:
+- **Logs:** `logs/` directory
+- **Reports:** `reports/` directory (JSON, CSV, summary)
 
-After each run:
-- Logs go to `logs/`
-- Reports go to `reports/`
+Quick interpretation:
+- Mostly `OK` and `UNCHANGED` means your sync is healthy
+- Any `NO_*` status means the item was skipped for safety and needs review
+- `UPLOAD_FAILED`, `ATTACH_FAILED`, or `NOTION_*` statuses indicate a Notion/network issue
 
-Each run creates:
-- Detailed JSON report
-- CSV report (easy to open in spreadsheet tools)
-- Summary JSON with status counts and top failure reasons
+---
 
-Quick read of results:
-- Mostly `OK` and `UNCHANGED` means your sync is healthy.
-- Any `NO_*` status means the item was skipped for safety and needs review.
-- `UPLOAD_FAILED`, `ATTACH_FAILED`, or `NOTION_*` statuses mean a Notion/network issue happened.
+## Safety Promise
 
-For most users: run `doctor`, then one dry run, then real sync.
+**What this app can change:**
+- One Notion files field (default: `PDF`) in matched rows
 
-## Common statuses
+**What this app cannot change:**
+- Zotero database content
+- Zotero files on disk
+- Other Notion fields
+- Other Notion databases
 
-- `OK`: upload and attach succeeded
-- `UNCHANGED`: already up to date, no upload needed
-- `NO_PDF`: no valid PDF found
-- `MULTIPLE_PDFS`: more than one valid PDF found
-- `NO_NOTION_MATCH`: no exact Notion match found
-- `MULTIPLE_NOTION_MATCHES`: more than one Notion row matched
-- `FILE_TOO_LARGE`: file exceeds configured upload limit
-- `UPLOAD_FAILED` or `ATTACH_FAILED`: Notion upload/attach issue
-- `STATE_SAVE_FAILED`: file attached in Notion, but local state save failed (later rerun may re-upload once)
-- `NOTION_NETWORK_ERROR`: network problem while talking to Notion
+**Security Notes:**
+- Keep `.env` private (never commit it)
+- Keep `config.yaml` machine-specific
+- Review reports before rerunning large operations
+- Close Zotero during sync for best consistency
 
-## Safety notes
-
-- Keep `.env` private (never commit it).
-- Keep `config.yaml` machine-specific.
-- Review reports before rerunning large operations.
-- Close Zotero during sync for best consistency.
-- Avoid `rebuild-page-files` and `full-reset` unless you understand what they change.
+---
 
 ## Troubleshooting
 
-- `NO_NOTION_MATCH`: The Zotero item could not be matched to a single Notion row. Check Notero link, Zotero URI property, or DOI mapping.
-- `MULTIPLE_NOTION_MATCHES`: More than one Notion row matched. Make the Notion mapping unique.
-- `NO_PDF` or `MULTIPLE_PDFS`: The Zotero item has no single valid PDF attachment.
-- `FILE_TOO_LARGE`: File is above your configured upload size limits in `config.yaml`.
-- `NOTION_AUTH_ERROR`: Token or integration permissions are wrong.
-- `NOTION_SCHEMA_ERROR`: Database/property IDs or property types do not match your config.
+| Issue | Solution |
+|-------|----------|
+| `NO_NOTION_MATCH` | Check Notero link, Zotero URI property, or DOI mapping |
+| `MULTIPLE_NOTION_MATCHES` | Make Notion mapping unique |
+| `NO_PDF` / `MULTIPLE_PDFS` | Check Zotero item attachments |
+| `FILE_TOO_LARGE` | Adjust `max_simple_upload_mb` in config |
+| `NOTION_AUTH_ERROR` | Check token and integration permissions |
+| `NOTION_SCHEMA_ERROR` | Verify database/property IDs in config, ensure PDF property exists and is "Files & media" type |
 
-## For contributors
+---
+
+## Official Notero Plugin
+
+This tool works alongside the official **Notero** plugin for Zotero:
+- **GitHub:** [dvanoni/notero](https://github.com/dvanoni/notero)
+- **Website:** [notero.vanoni.dev](https://notero.vanoni.dev)
+
+Install the Notero plugin first to sync metadata, then use NoteroPDF to sync PDF files.
+
+---
+
+## For Contributors
 
 Run tests:
 
@@ -256,10 +284,11 @@ CI runs:
 - tests (`pytest`)
 - package build smoke check (`python -m build`)
 
+---
+
 ## License
 
-This project is licensed under the MIT License.
-See `LICENSE` for details.
+This project is licensed under the MIT License. See `LICENSE` for details.
 
 ## Contact
 
