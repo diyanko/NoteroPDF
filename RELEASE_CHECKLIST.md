@@ -18,5 +18,7 @@
 
 ## 4. Release Hygiene
 - [ ] Update `CHANGELOG.md` with date + release notes.
-- [ ] Tag release version in git.
+- [ ] Tag release version in git (`git tag -a v0.1.0 -m "Release v0.1.0"`).
+- [ ] Push tag to GitHub (`git push origin main v0.1.0`).
+- [ ] Verify GitHub Release workflow succeeds and uploads `dist/*.whl` + `dist/*.tar.gz`.
 - [ ] Publish release notes in GitHub with known limitations (macOS-only v1).

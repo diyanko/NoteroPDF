@@ -59,6 +59,28 @@ You need:
 - Local Zotero data directory
 - macOS
 
+## Install from a release
+
+For public releases (example: `v0.1.0`), use one of these options.
+
+Install from wheel asset:
+
+```bash
+python -m pip install "https://github.com/diyanko/NoteroPDF/releases/download/v0.1.0/noteropdf-0.1.0-py3-none-any.whl"
+```
+
+Install from source archive:
+
+```bash
+python -m pip install "https://github.com/diyanko/NoteroPDF/archive/refs/tags/v0.1.0.tar.gz"
+```
+
+After install, run:
+
+```bash
+noteropdf --help
+```
+
 ## Quick setup
 
 1. Install dependencies:

@@ -8,6 +8,7 @@
 - Stronger safety reporting in `doctor`, including explicit Zotero read-only guarantees.
 - New status coverage and user guidance for `STATE_SAVE_FAILED` and `NOTION_NETWORK_ERROR`.
 - CI workflow for tests and package build smoke checks.
+- GitHub release workflow that builds and uploads wheel/sdist artifacts when a `v*` tag is pushed.
 - Release checklist for safer public releases.
 
 ### Changed
