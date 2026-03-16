@@ -1,10 +1,21 @@
 zotero:
   # Folder that contains zotero.sqlite and the storage folder.
+  # macOS example:
   data_dir: "/Users/your-username/Zotero"
+  # Windows example: data_dir: "C:\\Users\\your-username\\Zotero"
+  # Linux example: data_dir: "/home/your-username/Zotero"
+  
   # Full path to Zotero's main database file.
+  # macOS example:
   sqlite_path: "/Users/your-username/Zotero/zotero.sqlite"
+  # Windows example: sqlite_path: "C:\\Users\\your-username\\Zotero\\zotero.sqlite"
+  # Linux example: sqlite_path: "/home/your-username/Zotero/zotero.sqlite"
+  
   # Folder where Zotero stores local attachment files.
+  # macOS example:
   storage_dir: "/Users/your-username/Zotero/storage"
+  # Windows example: storage_dir: "C:\\Users\\your-username\\Zotero\\storage"
+  # Linux example: storage_dir: "/home/your-username/Zotero/storage"
 
 notion:
   # Environment variable name that stores your Notion integration token.

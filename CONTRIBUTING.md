@@ -58,6 +58,7 @@ Before opening a PR:
 - No secrets are committed (`.env`, private tokens, personal paths)
 - Error messages are clear and actionable
 - If this is a release PR, run the checks in `RELEASE_CHECKLIST.md`
+- For maintainers publishing a release, follow `RELEASE_PROCESS.md` as the canonical flow
 
 ## Coding guidelines
 
@@ -65,6 +66,13 @@ Before opening a PR:
 - Keep matching behavior deterministic.
 - Avoid destructive behavior by default.
 - Keep user-facing language plain and direct.
+
+### AI-assisted development policy
+
+This codebase is primarily built and maintained using AI assistants. If you are an AI assistant:
+1. You **MUST** read [AI_AGENTIC_DEVELOPMENT.md](./AI_AGENTIC_DEVELOPMENT.md) before making any changes.
+2. Favor readability, simplicity, and predictable behavior over complex abstractions. 
+3. Never swallow errors silently.
 
 ## Reporting bugs
 

@@ -22,6 +22,7 @@ NoteroPDF helps you attach the correct PDFs from your Zotero library to the corr
 - **Precise:** Uses strict matching rules (Notero links, URIs, DOIs) to avoid mistakes
 - **Transparent:** Generates detailed CSV/JSON reports after every run
 - **Simple:** Command-line interface that is easy to set up
+- **Guided Setup:** Includes `noteropdf setup` for first-run configuration
 
 **Who is this for:**
 - Users who already use Notero to sync metadata to Notion
@@ -39,7 +40,7 @@ Before you start, make sure you have:
 - [ ] Notion account with a database set up (using Notero)
 - [ ] Notion Internal Integration Token (secret key)
 - [ ] A **Files & media** property named "PDF" (or custom name) in your Notion database
-- [ ] macOS (v1 currently supports macOS only)
+- [ ] Windows, macOS, or Linux (cross-platform support)
 
 ---
 
@@ -102,6 +103,20 @@ If you named your property something different (e.g., "PDF Attachments"), update
 ---
 
 ## Configuration
+
+### Recommended: Guided Setup (Non-Technical Friendly)
+
+Run:
+
+```bash
+noteropdf setup
+```
+
+This will:
+- Detect a likely Zotero directory for your OS
+- Prompt for your Notion database settings
+- Save `config.yaml` in your user config directory
+- Store your token in OS keychain when available (or `.env` fallback)
 
 ### 1. Set up Environment Variables
 
@@ -189,6 +204,7 @@ python -m noteropdf sync
 | Command | Description |
 |---------|-------------|
 | `python -m noteropdf doctor` | Verify setup and access |
+| `python -m noteropdf support-bundle` | Export sanitized diagnostics zip for debugging |
 | `python -m noteropdf sync` | Normal sync (uploads only needed files) |
 | `python -m noteropdf sync --force` | Force re-upload everything |
 | `python -m noteropdf rebuild-page-files --yes` | Clear PDF values and rebuild from local files |
@@ -256,6 +272,15 @@ Quick interpretation:
 
 ---
 
+## Maintainer Release Docs
+
+If you are publishing a new version, use:
+
+- `RELEASE_PROCESS.md` for the standard release flow
+- `RELEASE_CHECKLIST.md` for pre-publish and post-publish checks
+
+---
+
 ## Official Notero Plugin
 
 This tool works alongside the official **Notero** plugin for Zotero:
@@ -283,6 +308,16 @@ noteropdf
 CI runs:
 - tests (`pytest`)
 - package build smoke check (`python -m build`)
+
+## Development Approach
+
+This project is AI-assisted and human-reviewed.
+
+To keep the app easy to maintain as features grow, code changes follow these principles:
+- Keep functions small and explicit
+- Prefer deterministic behavior over hidden "magic"
+- Preserve clear error messages with actionable next steps
+- Add tests with behavior changes
 
 ---
 

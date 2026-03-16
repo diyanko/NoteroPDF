@@ -8,6 +8,10 @@
 - Stronger safety reporting in `doctor`, including explicit Zotero read-only guarantees.
 - New status coverage and user guidance for `STATE_SAVE_FAILED` and `NOTION_NETWORK_ERROR`.
 - CI workflow for tests and package build smoke checks.
+- New `setup` command for first-run guided configuration.
+- New `support-bundle` command to export a sanitized diagnostics zip.
+- Optional OS keychain token support via `keyring`.
+- Platform-aware default paths for config/state/reports/logs via `platformdirs`.
 - GitHub release workflow that builds and uploads wheel/sdist artifacts when a `v*` tag is pushed.
 - Release checklist for safer public releases.
 
@@ -15,6 +19,8 @@
 - Clearer non-technical command output: "what happened" + "what to do next" summary blocks.
 - Improved Notion API error mapping with user-action hints.
 - Extra config sanity checks (token quality, log level validation, duplicate property field guard).
+- CI test workflow now runs on Linux, macOS, and Windows.
+- Debugging workflow now includes one-command diagnostics export for easier support.
 
 ### Safety Notes
 - Zotero remains strictly read-only (`mode=ro&immutable=1`) and query-guarded.
