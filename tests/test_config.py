@@ -4,7 +4,6 @@ import pytest
 
 from noteropdf.config import load_config
 
-
 CONFIG_TEMPLATE = """
 zotero:
   data_dir: "./zotero"
@@ -30,7 +29,9 @@ sync:
 VALID_TOKEN = "secret_test_token_that_is_long_enough_12345"
 
 
-def test_load_config_resolves_relative_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_load_config_resolves_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
 
@@ -48,7 +49,10 @@ def test_load_config_resolves_relative_paths(tmp_path: Path, monkeypatch: pytest
 
 def test_invalid_notion_id_fails(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text(CONFIG_TEMPLATE.replace("3180e681-3c44-8198-9a97-e4532809e30e", "not-a-uuid"), encoding="utf-8")
+    cfg_path.write_text(
+        CONFIG_TEMPLATE.replace("3180e681-3c44-8198-9a97-e4532809e30e", "not-a-uuid"),
+        encoding="utf-8",
+    )
 
     env_path = tmp_path / ".env"
     env_path.write_text(f"NOTION_TOKEN={VALID_TOKEN}\n", encoding="utf-8")
@@ -59,7 +63,9 @@ def test_invalid_notion_id_fails(tmp_path: Path):
 
 def test_upload_limits_validation(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
-    bad = CONFIG_TEMPLATE.replace("max_simple_upload_mb: 20", "max_simple_upload_mb: 30")
+    bad = CONFIG_TEMPLATE.replace(
+        "max_simple_upload_mb: 20", "max_simple_upload_mb: 30"
+    )
     bad = bad.replace("max_supported_mb: 25", "max_supported_mb: 20")
     cfg_path.write_text(bad, encoding="utf-8")
 
@@ -97,7 +103,9 @@ def test_invalid_log_level_fails(tmp_path: Path):
 
 def test_same_notion_property_names_fail(tmp_path: Path):
     cfg_path = tmp_path / "config.yaml"
-    bad = CONFIG_TEMPLATE.replace('zotero_uri_property_name: "Zotero URI"', 'zotero_uri_property_name: "PDF"')
+    bad = CONFIG_TEMPLATE.replace(
+        'zotero_uri_property_name: "Zotero URI"', 'zotero_uri_property_name: "PDF"'
+    )
     cfg_path.write_text(bad, encoding="utf-8")
 
     env_path = tmp_path / ".env"
@@ -131,3 +139,23 @@ def test_invalid_boolean_value_fails(tmp_path: Path):
 
     with pytest.raises(ValueError, match="sync.dry_run"):
         load_config(cfg_path, env_path)
+
+
+def test_load_config_uses_keyring_token_when_env_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.setattr(
+        "noteropdf.config.load_token_from_keyring",
+        lambda token_env: VALID_TOKEN if token_env == "NOTION_TOKEN" else "",
+    )
+
+    cfg = load_config(cfg_path, env_path)
+
+    assert cfg.notion_token == VALID_TOKEN
+    assert cfg.notion_token_source == "keyring"

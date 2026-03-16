@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import logging
 
 from .config import AppConfig
 from .models import CandidatePdf, SyncRow, ZoteroItem
@@ -30,13 +31,16 @@ class SyncEngine:
         self.zotero: ZoteroRepository | None = None
         self.notion: NotionClient | None = None
         self.state: StateStore | None = None
+        self._hash_cache: dict[str, str] = {}  # Cache for file hashes
         try:
             self.zotero = ZoteroRepository(
                 sqlite_path=cfg.zotero.sqlite_path,
                 storage_dir=cfg.zotero.storage_dir,
                 data_dir=cfg.zotero.data_dir,
             )
-            self.notion = NotionClient(token=cfg.notion_token, notion_version=cfg.notion.notion_version)
+            self.notion = NotionClient(
+                token=cfg.notion_token, notion_version=cfg.notion.notion_version
+            )
             self.state = StateStore(cfg.sync.state_db_path)
         except Exception:
             # Ensure partially initialized resources are always released.
@@ -75,25 +79,41 @@ class SyncEngine:
             return f"{base} Next step: {exc.hint}"
         return base
 
+    def _validate_zotero_paths(self) -> list[str]:
+        """Validate Zotero paths and return status messages."""
+        lines: list[str] = []
+        if not self.cfg.zotero.data_dir.exists():
+            raise RuntimeError(f"Zotero data_dir not found: {self.cfg.zotero.data_dir}")
+        if not self.cfg.zotero.sqlite_path.exists():
+            raise RuntimeError(
+                f"Zotero sqlite_path not found: {self.cfg.zotero.sqlite_path}"
+            )
+        if not self.cfg.zotero.storage_dir.exists():
+            raise RuntimeError(
+                f"Zotero storage_dir not found: {self.cfg.zotero.storage_dir}"
+            )
+        lines.append("- Zotero folders were found.")
+        return lines
+
     def doctor(self) -> list[str]:
         lines: list[str] = []
         lines.append("Setup check results")
 
-        if not self.cfg.zotero.data_dir.exists():
-            raise RuntimeError(f"Zotero data_dir not found: {self.cfg.zotero.data_dir}")
-        if not self.cfg.zotero.sqlite_path.exists():
-            raise RuntimeError(f"Zotero sqlite_path not found: {self.cfg.zotero.sqlite_path}")
-        if not self.cfg.zotero.storage_dir.exists():
-            raise RuntimeError(f"Zotero storage_dir not found: {self.cfg.zotero.storage_dir}")
-        lines.append("- Zotero folders were found.")
+        lines.extend(self._validate_zotero_paths())
+
+        lines.append(f"- Notion token source: {self.cfg.notion_token_source}.")
 
         try:
             sample = self.zotero.list_parent_items()
-            lines.append(f"- Zotero library can be read. Found {len(sample)} parent items.")
+            lines.append(
+                f"- Zotero library can be read. Found {len(sample)} parent items."
+            )
         except Exception as exc:
             raise RuntimeError(f"Zotero DB read-only check failed: {exc}") from exc
         safety = self.zotero.read_only_guarantees()
-        lines.append("- Zotero write safety: guaranteed (immutable read-only connection and read-only query guard).")
+        lines.append(
+            "- Zotero write safety: guaranteed (immutable read-only connection and read-only query guard)."
+        )
         if not all(safety.values()):
             raise RuntimeError("Zotero safety checks failed. Refusing to continue.")
 
@@ -108,14 +128,32 @@ class SyncEngine:
         lines.append(f"- Notion data source was resolved: {ds_id}")
 
         self.notion.validate_pdf_property(ds_id, self.cfg.notion.pdf_property_name)
-        lines.append(f"- Target Notion property '{self.cfg.notion.pdf_property_name}' exists and is a files field.")
+        lines.append(
+            f"- Target Notion property '{self.cfg.notion.pdf_property_name}' exists and is a files field."
+        )
 
-        has_uri = self.notion.has_property(ds_id, self.cfg.notion.zotero_uri_property_name)
+        has_uri = self.notion.has_property(
+            ds_id, self.cfg.notion.zotero_uri_property_name
+        )
         lines.append(
             f"- Optional match property '{self.cfg.notion.zotero_uri_property_name}' is "
             f"{'present' if has_uri else 'missing'}."
         )
-        lines.append("- Safety scope: this app only updates the configured Notion files field.")
+
+        for label, path in (
+            ("State DB folder", self.cfg.sync.state_db_path.parent),
+            ("Report folder", self.cfg.sync.report_dir),
+            ("Log folder", self.cfg.sync.log_dir),
+        ):
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                raise RuntimeError(f"{label} is not writable: {path} ({exc})") from exc
+            lines.append(f"- {label} is writable: {path}")
+
+        lines.append(
+            "- Safety scope: this app only updates the configured Notion files field."
+        )
         return lines
 
     def estimate_parent_item_count(self) -> int:
@@ -125,7 +163,8 @@ class SyncEngine:
         return len(self.state.list_known_page_ids())
 
     def _resolve_match(self, item: ZoteroItem) -> MatchResult:
-        assert self.data_source_id is not None
+        if self.data_source_id is None:
+            raise RuntimeError("data_source_id must be set before matching")
         # 1) Primary match: Notero page URL attachment.
         page_id = self.zotero.extract_notero_page_id(item)
         stale_primary = False
@@ -142,7 +181,9 @@ class SyncEngine:
             stale_primary = True
 
         # 2) Secondary match: exact Zotero URI property.
-        if self.notion.has_property(self.data_source_id, self.cfg.notion.zotero_uri_property_name):
+        if self.notion.has_property(
+            self.data_source_id, self.cfg.notion.zotero_uri_property_name
+        ):
             uri_prop_type = (
                 self.notion.get_property_type(
                     self.data_source_id,
@@ -174,7 +215,9 @@ class SyncEngine:
                     )
 
             if len(matches) == 1:
-                return MatchResult(Status.OK, matches[0].page_id, matches[0].page_url, None)
+                return MatchResult(
+                    Status.OK, matches[0].page_id, matches[0].page_url, None
+                )
             if len(matches) > 1:
                 return MatchResult(
                     Status.MULTIPLE_NOTION_MATCHES,
@@ -184,11 +227,19 @@ class SyncEngine:
                 )
 
         # 3) Tertiary match: exact DOI when both sides expose it.
-        if item.doi and self.notion.has_property(self.data_source_id, "DOI"):
-            doi_prop_type = self.notion.get_property_type(self.data_source_id, "DOI") or "rich_text"
-            matches = self.notion.query_by_doi(self.data_source_id, "DOI", item.doi, doi_prop_type)
+        doi_property = self.cfg.notion.doi_property_name
+        if item.doi and self.notion.has_property(self.data_source_id, doi_property):
+            doi_prop_type = (
+                self.notion.get_property_type(self.data_source_id, doi_property)
+                or "rich_text"
+            )
+            matches = self.notion.query_by_doi(
+                self.data_source_id, doi_property, item.doi, doi_prop_type
+            )
             if len(matches) == 1:
-                return MatchResult(Status.OK, matches[0].page_id, matches[0].page_url, None)
+                return MatchResult(
+                    Status.OK, matches[0].page_id, matches[0].page_url, None
+                )
             if len(matches) > 1:
                 return MatchResult(
                     Status.MULTIPLE_NOTION_MATCHES,
@@ -199,25 +250,33 @@ class SyncEngine:
 
         msg = "No confident Notion match found"
         if stale_primary:
-            msg = (
-                "Notero page link exists but page is missing/inaccessible and no deterministic fallback match was found"
-            )
+            msg = "Notero page link exists but page is missing/inaccessible and no deterministic fallback match was found"
         return MatchResult(Status.NO_NOTION_MATCH, None, None, msg)
 
-    def _needs_upload(self, item_key: str, page_id: str, pdf: CandidatePdf, *, force: bool) -> tuple[bool, str, str]:
+    def _get_cached_hash(self, pdf_path: str) -> str:
+        """Get file hash from cache or compute and cache it."""
+        if pdf_path not in self._hash_cache:
+            self._hash_cache[pdf_path] = sha256_file(Path(pdf_path))
+        return self._hash_cache[pdf_path]
+
+    def _needs_upload(
+        self, item_key: str, page_id: str, pdf: CandidatePdf, *, force: bool
+    ) -> tuple[bool, str, str]:
         rec = self.state.get(item_key)
 
         if force:
-            digest = sha256_file(Path(pdf.absolute_path))
+            digest = self._get_cached_hash(pdf.absolute_path)
             return True, "forced", digest
 
-        remote_files_count = self.notion.page_files_count(page_id, self.cfg.notion.pdf_property_name)
+        remote_files_count = self.notion.page_files_count(
+            page_id, self.cfg.notion.pdf_property_name
+        )
         if remote_files_count == 0:
-            digest = sha256_file(Path(pdf.absolute_path))
+            digest = self._get_cached_hash(pdf.absolute_path)
             return True, "missing_remote_pdf", digest
 
         if rec is None:
-            digest = sha256_file(Path(pdf.absolute_path))
+            digest = self._get_cached_hash(pdf.absolute_path)
             return True, "first_sync", digest
 
         if (
@@ -228,8 +287,12 @@ class SyncEngine:
         ):
             return False, "quick_fingerprint_match", rec.pdf_sha256
 
-        digest = sha256_file(Path(pdf.absolute_path))
-        if rec.pdf_sha256 == digest and rec.notion_page_id == page_id and rec.pdf_size == pdf.size:
+        digest = self._get_cached_hash(pdf.absolute_path)
+        if (
+            rec.pdf_sha256 == digest
+            and rec.notion_page_id == page_id
+            and rec.pdf_size == pdf.size
+        ):
             return False, "hash_match", digest
 
         return True, "changed", digest
@@ -244,7 +307,9 @@ class SyncEngine:
 
         rows: list[SyncRow] = []
         items = list(self.zotero.all_items())
-        self._logger.info("Starting sync run: total_parent_items=%s force=%s", len(items), force)
+        self._logger.info(
+            "Starting sync run: total_parent_items=%s force=%s", len(items), force
+        )
 
         for idx, item in enumerate(items, start=1):
             row = self._sync_one(item, force=force)
@@ -292,7 +357,8 @@ class SyncEngine:
                 error_message=pdf_msg,
             )
 
-        assert pdf is not None
+        if pdf is None:
+            raise RuntimeError("PDF must be selected before upload")
 
         try:
             match = self._resolve_match(item)
@@ -323,7 +389,8 @@ class SyncEngine:
                 error_message=match.message,
             )
 
-        assert match.page_id is not None
+        if match.page_id is None:
+            raise RuntimeError("Match result must have page_id")
 
         max_supported = self.cfg.sync.max_supported_mb * 1024 * 1024
         if pdf.size > max_supported:
@@ -358,7 +425,9 @@ class SyncEngine:
             )
 
         try:
-            needs_upload, reason, digest = self._needs_upload(item.key, match.page_id, pdf, force=force)
+            needs_upload, reason, digest = self._needs_upload(
+                item.key, match.page_id, pdf, force=force
+            )
         except NotionApiError as exc:
             return SyncRow(
                 zotero_item_key=item.key,
@@ -368,7 +437,9 @@ class SyncEngine:
                 notion_page_url=match.page_url,
                 local_pdf_path=pdf.absolute_path,
                 action_taken="error",
-                final_status=self._normalize_status_code(exc.code, Status.ATTACH_FAILED),
+                final_status=self._normalize_status_code(
+                    exc.code, Status.ATTACH_FAILED
+                ),
                 error_message=self._format_api_error(exc),
             )
 
@@ -414,7 +485,9 @@ class SyncEngine:
                 notion_page_url=match.page_url,
                 local_pdf_path=pdf.absolute_path,
                 action_taken="upload",
-                final_status=self._normalize_status_code(exc.code, Status.UPLOAD_FAILED),
+                final_status=self._normalize_status_code(
+                    exc.code, Status.UPLOAD_FAILED
+                ),
                 error_message=self._format_api_error(exc),
             )
 
@@ -453,7 +526,7 @@ class SyncEngine:
                     last_error_code=None,
                 )
             )
-        except Exception as exc:
+        except (OSError, sqlite3.Error, RuntimeError) as exc:
             self._logger.error(
                 "Upload attached but local state update failed for item=%s page=%s: %s",
                 item.key,
@@ -536,7 +609,9 @@ class SyncEngine:
                         notion_page_url=None,
                         local_pdf_path=None,
                         action_taken="clear_pdf_property",
-                        final_status=self._normalize_status_code(exc.code, Status.ATTACH_FAILED),
+                        final_status=self._normalize_status_code(
+                            exc.code, Status.ATTACH_FAILED
+                        ),
                         error_message=self._format_api_error(exc),
                     )
                 )
@@ -555,7 +630,9 @@ class SyncEngine:
         for page_id in page_ids:
             try:
                 if not self.cfg.sync.dry_run:
-                    self.notion.clear_page_files(page_id, self.cfg.notion.pdf_property_name)
+                    self.notion.clear_page_files(
+                        page_id, self.cfg.notion.pdf_property_name
+                    )
                 rows.append(
                     SyncRow(
                         zotero_item_key="",
@@ -580,7 +657,9 @@ class SyncEngine:
                         notion_page_url=None,
                         local_pdf_path=None,
                         action_taken="clear_pdf_property",
-                        final_status=self._normalize_status_code(exc.code, Status.ATTACH_FAILED),
+                        final_status=self._normalize_status_code(
+                            exc.code, Status.ATTACH_FAILED
+                        ),
                         error_message=self._format_api_error(exc),
                     )
                 )
@@ -588,5 +667,7 @@ class SyncEngine:
         if not self.cfg.sync.dry_run and all_clears_ok:
             self.state.clear_all()
         elif not self.cfg.sync.dry_run and not all_clears_ok:
-            self._logger.warning("Not clearing local sync state because one or more Notion clear operations failed")
+            self._logger.warning(
+                "Not clearing local sync state because one or more Notion clear operations failed"
+            )
         return rows

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
+import re
 import sqlite3
 import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Iterable
 
 from .models import CandidatePdf, ZoteroAttachment, ZoteroItem
 from .util import parse_notion_page_id_from_url
@@ -21,10 +23,18 @@ class ZoteroRepository:
     def close(self) -> None:
         self._conn.close()
 
-    def _execute_readonly(self, sql: str, params: tuple | None = None) -> sqlite3.Cursor:
+    def _execute_readonly(
+        self, sql: str, params: tuple | None = None
+    ) -> sqlite3.Cursor:
         prefix = sql.lstrip().upper()
-        if not (prefix.startswith("SELECT") or prefix.startswith("WITH") or prefix.startswith("PRAGMA")):
-            raise RuntimeError("Internal safety check failed: attempted non-readonly Zotero SQL")
+        if not (
+            prefix.startswith("SELECT")
+            or prefix.startswith("WITH")
+            or prefix.startswith("PRAGMA")
+        ):
+            raise RuntimeError(
+                "Internal safety check failed: attempted non-readonly Zotero SQL"
+            )
         if params is None:
             return self._conn.execute(sql)
         return self._conn.execute(sql, params)
@@ -113,7 +123,9 @@ class ZoteroRepository:
             )
         return out
 
-    def list_child_attachments(self, parent_item_id: int, parent_key: str) -> list[ZoteroAttachment]:
+    def list_child_attachments(
+        self, parent_item_id: int, parent_key: str
+    ) -> list[ZoteroAttachment]:
         cur = self._execute_readonly(
             """
             WITH f_title AS (
@@ -169,7 +181,34 @@ class ZoteroRepository:
 
         if raw.startswith("file://"):
             parsed = urllib.parse.urlparse(raw)
-            return Path(urllib.parse.unquote(parsed.path)).expanduser().resolve()
+            netloc = parsed.netloc
+            is_windows_drive_path = False
+
+            # Handle file URLs with netloc for Windows drive letters and UNC paths.
+            if netloc and netloc.lower() != "localhost":
+                if re.fullmatch(r"[A-Za-z]:", netloc):
+                    # Windows drive letter URL (e.g., file://C:/path)
+                    url_path = f"{netloc}{parsed.path}"
+                    is_windows_drive_path = True
+                else:
+                    # UNC path (e.g., file://server/share/path)
+                    url_path = f"//{netloc}{parsed.path}"
+            else:
+                # Standard local path (e.g., file:///C:/path or file:///path)
+                if re.match(r"^/[A-Za-z]:", parsed.path):
+                    # file:///C:/... must drop the extra leading slash.
+                    url_path = parsed.path[1:]
+                    is_windows_drive_path = True
+                else:
+                    url_path = parsed.path
+
+            resolved_path = urllib.request.url2pathname(url_path)
+
+            # On Unix, C:/... is relative; anchor it to root so it never resolves under cwd.
+            if is_windows_drive_path and not Path(resolved_path).is_absolute():
+                resolved_path = f"/{resolved_path.lstrip('/')}"
+
+            return Path(resolved_path).expanduser().resolve()
 
         p = Path(raw).expanduser()
         if p.is_absolute():
@@ -177,7 +216,9 @@ class ZoteroRepository:
 
         return (self._data_dir / p).resolve()
 
-    def select_candidate_pdf(self, parent: ZoteroItem) -> tuple[str, CandidatePdf | None, str | None]:
+    def select_candidate_pdf(
+        self, parent: ZoteroItem
+    ) -> tuple[str, CandidatePdf | None, str | None]:
         attachments = self.list_child_attachments(parent.item_id, parent.key)
 
         valid: list[CandidatePdf] = []
@@ -190,15 +231,27 @@ class ZoteroRepository:
                 broken_found = True
                 continue
 
-            is_pdf = (att.content_type or "").lower() == "application/pdf" or path.suffix.lower() == ".pdf"
+            is_pdf = (
+                att.content_type or ""
+            ).lower() == "application/pdf" or path.suffix.lower() == ".pdf"
             if not is_pdf:
                 continue
 
             stat = path.stat()
-            valid.append(CandidatePdf(absolute_path=str(path), size=stat.st_size, mtime_ns=stat.st_mtime_ns))
+            valid.append(
+                CandidatePdf(
+                    absolute_path=str(path),
+                    size=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                )
+            )
 
         if len(valid) == 0 and broken_found:
-            return ("BROKEN_ATTACHMENT_PATH", None, "Attachment path is missing or not readable")
+            return (
+                "BROKEN_ATTACHMENT_PATH",
+                None,
+                "Attachment path is missing or not readable",
+            )
         if len(valid) == 0:
             return ("NO_PDF", None, "No valid PDF attachment found")
         if len(valid) > 1:

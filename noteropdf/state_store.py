@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import os
 import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 
@@ -44,9 +44,11 @@ class StateStore:
     def _acquire_lock(self) -> None:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            # Create lock file with owner-only permissions (0o600)
             self._lock_fd = os.open(
                 str(self._lock_path),
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
             )
             os.write(self._lock_fd, str(os.getpid()).encode("ascii", errors="ignore"))
         except FileExistsError as exc:

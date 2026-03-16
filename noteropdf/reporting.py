@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import csv
+import json
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-import csv
-from collections import Counter
-import json
 
 from .models import SyncRow
 
@@ -34,7 +34,9 @@ def _build_summary(rows: list[SyncRow]) -> dict:
     }
 
 
-def write_reports(report_dir: Path, command_name: str, rows: list[SyncRow]) -> tuple[Path, Path, Path]:
+def write_reports(
+    report_dir: Path, command_name: str, rows: list[SyncRow]
+) -> tuple[Path, Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base = f"{command_name}-{ts}"

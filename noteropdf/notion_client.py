@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import time
 
 import requests
 
 
 class NotionApiError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int | None = None, hint: str | None = None):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int | None = None,
+        hint: str | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
@@ -57,9 +63,13 @@ class NotionClient:
             attempt += 1
             try:
                 if raw_data is not None:
-                    resp = self._session.request(method, url, headers=headers, data=raw_data, timeout=60)
+                    resp = self._session.request(
+                        method, url, headers=headers, data=raw_data, timeout=60
+                    )
                 else:
-                    resp = self._session.request(method, url, headers=headers, json=json_body, timeout=60)
+                    resp = self._session.request(
+                        method, url, headers=headers, json=json_body, timeout=60
+                    )
             except requests.RequestException as exc:
                 if attempt >= self._max_retries:
                     raise NotionApiError(
@@ -133,7 +143,11 @@ class NotionClient:
         except Exception:
             payload = None
 
-        if resp.status_code == 400 and api_code in {"validation_error", "invalid_json", "invalid_request"}:
+        if resp.status_code == 400 and api_code in {
+            "validation_error",
+            "invalid_json",
+            "invalid_request",
+        }:
             return NotionApiError(
                 "NOTION_SCHEMA_ERROR",
                 f"Notion request validation failed: {message}",
@@ -172,7 +186,9 @@ class NotionClient:
     def ping(self) -> None:
         self._request("GET", "/users/me")
 
-    def resolve_data_source_id(self, database_id: str, configured_data_source_id: str) -> str:
+    def resolve_data_source_id(
+        self, database_id: str, configured_data_source_id: str
+    ) -> str:
         if configured_data_source_id:
             return configured_data_source_id
 
@@ -185,7 +201,9 @@ class NotionClient:
             )
         ds_id = data_sources[0].get("id", "")
         if not ds_id:
-            raise NotionApiError("NOTION_SCHEMA_ERROR", "Resolved data source has no id")
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR", "Resolved data source has no id"
+            )
         return ds_id
 
     def get_data_source_schema(self, data_source_id: str) -> dict[str, Any]:
@@ -200,10 +218,16 @@ class NotionClient:
         schema = self.get_data_source_schema(data_source_id)
         props = schema.get("properties") or {}
         if property_name not in props:
-            raise NotionApiError("NOTION_SCHEMA_ERROR", f"Missing required Notion property: {property_name}")
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Missing required Notion property: {property_name}",
+            )
         ptype = props[property_name].get("type")
         if ptype != "files":
-            raise NotionApiError("NOTION_SCHEMA_ERROR", f"Property '{property_name}' exists but is not type 'files'")
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Property '{property_name}' exists but is not type 'files'",
+            )
 
     def has_property(self, data_source_id: str, property_name: str) -> bool:
         schema = self.get_data_source_schema(data_source_id)
@@ -251,7 +275,9 @@ class NotionClient:
             query_body = dict(body)
             if cursor:
                 query_body["start_cursor"] = cursor
-            payload = self._request("POST", f"/data_sources/{data_source_id}/query", json_body=query_body)
+            payload = self._request(
+                "POST", f"/data_sources/{data_source_id}/query", json_body=query_body
+            )
             matches.extend(self._extract_matches(payload))
             if len(matches) > 1:
                 return matches
@@ -301,7 +327,9 @@ class NotionClient:
         }
         self._request("PATCH", f"/pages/{page_id}", json_body=body)
 
-    def create_file_upload(self, filename: str, content_type: str, file_size: int) -> dict[str, Any]:
+    def create_file_upload(
+        self, filename: str, content_type: str, file_size: int
+    ) -> dict[str, Any]:
         body = {
             "filename": filename,
             "content_type": content_type,
@@ -314,7 +342,9 @@ class NotionClient:
         upload_obj = create_payload.get("file_upload") or create_payload
         upload_id = upload_obj.get("id") or create_payload.get("id")
         if not isinstance(upload_id, str) or not upload_id.strip():
-            raise NotionApiError("UPLOAD_FAILED", "File upload id missing from create response")
+            raise NotionApiError(
+                "UPLOAD_FAILED", "File upload id missing from create response"
+            )
         upload_id = upload_id.strip()
 
         size_bytes = pdf_path.stat().st_size
@@ -333,7 +363,9 @@ class NotionClient:
                         "Authorization": self._headers["Authorization"],
                         "Notion-Version": self._headers["Notion-Version"],
                     }
-                    resp = self._session.post(upload_url, headers=headers, files=files, timeout=upload_timeout)
+                    resp = self._session.post(
+                        upload_url, headers=headers, files=files, timeout=upload_timeout
+                    )
             except requests.RequestException as exc:
                 raise NotionApiError(
                     "NOTION_NETWORK_ERROR",
@@ -405,7 +437,9 @@ class NotionClient:
             hint="Retry sync and inspect logs if this repeats.",
         )
 
-    def attach_file_upload_to_page(self, page_id: str, property_name: str, upload_id: str, filename: str) -> None:
+    def attach_file_upload_to_page(
+        self, page_id: str, property_name: str, upload_id: str, filename: str
+    ) -> None:
         safe_name = filename
         if len(safe_name) > 100:
             p = Path(safe_name)

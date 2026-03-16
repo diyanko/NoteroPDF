@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
-import logging
 
 
 def setup_run_logging(log_dir: Path, command_name: str, log_level: str) -> Path:

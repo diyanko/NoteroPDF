@@ -1,6 +1,6 @@
-from noteropdf.notion_client import NotionClient
-from noteropdf.notion_client import NotionApiError
 import requests
+
+from noteropdf.notion_client import NotionApiError, NotionClient
 
 
 def test_query_by_property_equals_handles_pagination_for_ambiguity(monkeypatch):
@@ -96,7 +96,11 @@ def test_request_maps_validation_errors_to_schema_error(monkeypatch):
 def test_request_maps_auth_error_to_plain_message(monkeypatch):
     client = NotionClient(token="x", notion_version="2026-03-11", max_retries=1)
 
-    monkeypatch.setattr(client._session, "request", lambda *args, **kwargs: _FakeResponse(401, text="unauthorized"))
+    monkeypatch.setattr(
+        client._session,
+        "request",
+        lambda *args, **kwargs: _FakeResponse(401, text="unauthorized"),
+    )
 
     try:
         client._request("GET", "/users/me")
@@ -112,7 +116,11 @@ def test_request_maps_auth_error_to_plain_message(monkeypatch):
 def test_request_maps_non_json_success_payload_to_api_error(monkeypatch):
     client = NotionClient(token="x", notion_version="2026-03-11", max_retries=1)
 
-    monkeypatch.setattr(client._session, "request", lambda *args, **kwargs: _FakeResponse(200, text="ok", payload=None))
+    monkeypatch.setattr(
+        client._session,
+        "request",
+        lambda *args, **kwargs: _FakeResponse(200, text="ok", payload=None),
+    )
 
     try:
         client._request("GET", "/users/me")

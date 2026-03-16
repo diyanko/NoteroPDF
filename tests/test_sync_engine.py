@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 from typing import Any
 
-from noteropdf.notion_client import NotionApiError
-from noteropdf.sync_engine import MatchResult, SyncEngine
-from noteropdf.status import Status
 from noteropdf.models import CandidatePdf, ZoteroItem
+from noteropdf.notion_client import NotionApiError
+from noteropdf.status import Status
+from noteropdf.sync_engine import MatchResult, SyncEngine
 
 
 class _FakeState:
@@ -76,7 +76,11 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path):
         zotero_web_uri=None,
         notero_page_url=None,
     )
-    pdf = CandidatePdf(absolute_path=str(pdf_path), size=pdf_path.stat().st_size, mtime_ns=pdf_path.stat().st_mtime_ns)
+    pdf = CandidatePdf(
+        absolute_path=str(pdf_path),
+        size=pdf_path.stat().st_size,
+        mtime_ns=pdf_path.stat().st_mtime_ns,
+    )
 
     class _State:
         def get(self, _):
@@ -111,9 +115,18 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path):
     )
     casted.state = _State()
     casted.notion = _Notion()
-    casted.zotero = SimpleNamespace(select_candidate_pdf=lambda _item: (Status.OK.value, pdf, None))
-    casted._logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None, error=lambda *args, **kwargs: None)
-    casted._resolve_match = lambda _item: MatchResult(Status.OK, "page-1", "https://notion.so/page-1", None)
+    casted.zotero = SimpleNamespace(
+        select_candidate_pdf=lambda _item: (Status.OK.value, pdf, None)
+    )
+    casted._logger = SimpleNamespace(
+        info=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+        error=lambda *args, **kwargs: None,
+    )
+    casted._get_cached_hash = lambda x: "dummy-hash"
+    casted._resolve_match = lambda _item: MatchResult(
+        Status.OK, "page-1", "https://notion.so/page-1", None
+    )
     casted.data_source_id = "ds"
 
     row = engine._sync_one(item, force=False)
