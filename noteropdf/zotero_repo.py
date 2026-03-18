@@ -123,6 +123,26 @@ class ZoteroRepository:
             )
         return out
 
+    def count_group_parent_items(self) -> int:
+        group_map = self.get_library_group_map()
+        if not group_map:
+            return 0
+        placeholders = ",".join("?" for _ in group_map)
+        cur = self._execute_readonly(
+            f"""
+            SELECT COUNT(*) AS group_parent_count
+            FROM items
+            LEFT JOIN itemAttachments child ON child.itemID = items.itemID
+            LEFT JOIN deletedItems di ON di.itemID = items.itemID
+            WHERE child.itemID IS NULL
+              AND di.itemID IS NULL
+              AND items.libraryID IN ({placeholders})
+            """,
+            tuple(group_map.keys()),
+        )
+        row = cur.fetchone()
+        return int(row["group_parent_count"] or 0)
+
     def list_child_attachments(
         self, parent_item_id: int, parent_key: str
     ) -> list[ZoteroAttachment]:

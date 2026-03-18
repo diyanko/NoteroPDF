@@ -1,30 +1,15 @@
 zotero:
   # Folder that contains zotero.sqlite and the storage folder.
-  # macOS example:
+  # setup usually discovers this automatically.
   data_dir: "/Users/your-username/Zotero"
-  # Windows example: data_dir: "C:\\Users\\your-username\\Zotero"
-  # Linux example: data_dir: "/home/your-username/Zotero"
-  
-  # Full path to Zotero's main database file.
-  # macOS example:
-  sqlite_path: "/Users/your-username/Zotero/zotero.sqlite"
-  # Windows example: sqlite_path: "C:\\Users\\your-username\\Zotero\\zotero.sqlite"
-  # Linux example: sqlite_path: "/home/your-username/Zotero/zotero.sqlite"
-  
-  # Folder where Zotero stores local attachment files.
-  # macOS example:
-  storage_dir: "/Users/your-username/Zotero/storage"
-  # Windows example: storage_dir: "C:\\Users\\your-username\\Zotero\\storage"
-  # Linux example: storage_dir: "/home/your-username/Zotero/storage"
 
 notion:
   # Environment variable name that stores your Notion integration token.
   token_env: "NOTION_TOKEN"
-  # Required API version. Keep this exact value.
-  notion_version: "2026-03-11"
-  # UUID of the Notion database that contains your rows.
+  # setup usually discovers and writes this for you.
+  # if you edit this file manually, replace the blank value with your real database URL or UUID before running doctor/sync.
   database_id: ""
-  # Optional UUID of the data source (recommended to set explicitly).
+  # optional explicit data source UUID if your database contains more than one data source.
   data_source_id: ""
   # Name of the files property where PDFs should be attached.
   pdf_property_name: "PDF"
@@ -32,19 +17,5 @@ notion:
   zotero_uri_property_name: "Zotero URI"
 
 sync:
-  # Local cache DB used to detect unchanged files.
-  state_db_path: ".sync-state.sqlite3"
-  # Folder for per-run JSON/CSV/summary reports.
-  report_dir: "./reports"
-  # Folder for run logs.
-  log_dir: "./logs"
-  # Console verbosity: DEBUG, INFO, WARNING, ERROR.
-  log_level: "INFO"
   # If true, simulate actions without writing to Notion.
-  dry_run: false
-  # If false, stop at first non-OK/non-UNCHANGED item (safer default).
-  continue_on_error: false
-  # v1 upload limit (single-part upload path).
-  max_simple_upload_mb: 20
-  # Hard max accepted by this app.
-  max_supported_mb: 20
+  dry_run: true

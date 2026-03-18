@@ -7,28 +7,42 @@ import sys
 from collections import Counter
 from pathlib import Path
 from time import perf_counter
-from typing import Callable
 
-from .config import (detect_zotero_data_dir, get_default_config_path,
-                     get_default_env_path, get_default_sync_paths,
+from .config import (LATEST_NOTION_VERSION, detect_zotero_data_dir,
+                     get_default_config_path, get_default_env_path,
                      keyring_available, load_config, render_setup_config,
                      store_token_in_keyring)
 from .logging_setup import setup_run_logging
+from .notion_client import NotionApiError, NotionClient
 from .reporting import write_reports
-from .support_bundle import build_support_bundle
 from .sync_engine import SyncEngine
 from .util import zotero_maybe_open
 
+MIN_PYTHON = (3, 11)
+MAX_PYTHON_EXCLUSIVE = (3, 14)
+
+
+class _CleanHelpParser(argparse.ArgumentParser):
+    def format_help(self) -> str:
+        text = super().format_help()
+        lines = [line for line in text.splitlines() if "==SUPPRESS==" not in line]
+        return "\n".join(lines).rstrip() + "\n"
+
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _CleanHelpParser(
         prog="noteropdf",
         description="Upload local Zotero PDFs to matching Notion rows in a safe, predictable way.",
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--env", default=".env", help="Path to .env file")
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{setup,doctor,sync}",
+        parser_class=_CleanHelpParser,
+    )
 
     setup_p = sub.add_parser("setup", help="Guided first-time configuration")
     setup_p.add_argument(
@@ -38,29 +52,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("doctor", help="Check setup and access. Run this first.")
-    sub.add_parser(
-        "support-bundle",
-        help="Create a sanitized diagnostics zip for support/debugging",
-    )
-
     sync_p = sub.add_parser("sync", help="Upload only files that need updates")
     sync_p.add_argument(
         "--force", action="store_true", help="Force re-upload even when unchanged"
-    )
-
-    rebuild_p = sub.add_parser(
-        "rebuild-page-files",
-        help="Clear known PDF fields, then upload fresh files again",
-    )
-    rebuild_p.add_argument(
-        "--yes", action="store_true", help="Required confirmation flag"
-    )
-
-    reset_p = sub.add_parser(
-        "full-reset", help="Dangerous: clear known PDF fields and local sync state"
-    )
-    reset_p.add_argument(
-        "--yes", action="store_true", help="Required confirmation flag"
     )
 
     return parser
@@ -73,12 +67,12 @@ def _status_help_text(status: str) -> str | None:
         "BROKEN_ATTACHMENT_PATH": "Some Zotero attachment paths are broken. Re-link the attachment in Zotero.",
         "NO_NOTION_MATCH": "Some items could not be matched in Notion. Check Notero link, Zotero URI, or DOI mapping.",
         "MULTIPLE_NOTION_MATCHES": "Multiple Notion rows matched one item. Make the mapping unique, then rerun.",
-        "FILE_TOO_LARGE": "A file is above allowed upload size. Lower file size or adjust limits carefully.",
+        "FILE_TOO_LARGE": "A file is above the current Notion workspace upload limit. Use a smaller PDF and rerun sync.",
         "NOTION_AUTH_ERROR": "Notion access failed. Verify token and integration permissions.",
         "NOTION_SCHEMA_ERROR": "Notion schema mismatch. Confirm property names and types with doctor.",
         "NOTION_RATE_LIMIT": "Notion is rate limiting requests. Wait and rerun.",
         "NOTION_NETWORK_ERROR": "Network issue talking to Notion. Check connection and rerun.",
-        "UPLOAD_FAILED": "File upload failed. Rerun sync; unchanged items are skipped automatically.",
+        "UPLOAD_FAILED": "File upload failed. Rerun sync after checking the logs; sync repairs common Notion-side drift automatically.",
         "ATTACH_FAILED": "Upload finished but attaching to page failed. Rerun sync after checking Notion access.",
         "STATE_SAVE_FAILED": "PDF was attached, but local state save failed. Next run may re-upload the file.",
     }
@@ -135,33 +129,6 @@ def _print_write_preflight(
         logger.info("- Dry run is OFF. Matching rows may be updated in Notion.")
 
 
-def _confirm_destructive_action(
-    *,
-    action_label: str,
-    property_name: str,
-    page_count: int,
-    input_fn: Callable[[str], str] | None = None,
-) -> bool:
-    logger = logging.getLogger("noteropdf.cli")
-    expected = f"CONFIRM {page_count}"
-    logger.warning(
-        "%s will clear '%s' on %s page(s).",
-        action_label,
-        property_name,
-        page_count,
-    )
-    logger.warning("Type '%s' to continue.", expected)
-    fn = input_fn or input
-    try:
-        typed = fn("> ").strip()
-    except EOFError:
-        return False
-    if typed != expected:
-        logger.error("Confirmation text did not match. Operation cancelled.")
-        return False
-    return True
-
-
 def _prompt_value(
     prompt: str, default: str | None = None, required: bool = True
 ) -> str:
@@ -180,7 +147,6 @@ def _prompt_value(
 def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     default_cfg_path = get_default_config_path()
     default_env_path = get_default_env_path()
-    state_db_path, report_dir, log_dir = get_default_sync_paths()
 
     effective_config_path = config_path
     effective_env_path = env_path
@@ -191,7 +157,7 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
 
     if effective_config_path.exists() and not force_overwrite:
         print(f"Config already exists at: {effective_config_path}")
-        yn = _prompt_value("Overwrite existing config? (yes/no)", default="no")
+        yn = _prompt_value("Replace the existing saved setup? (yes/no)", default="no")
         if yn.strip().lower() not in {"y", "yes"}:
             print("Setup cancelled.")
             return 2
@@ -199,50 +165,98 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     detected = detect_zotero_data_dir()
     default_data_dir = str(detected) if detected else str(Path.home() / "Zotero")
     data_dir = Path(
-        _prompt_value("Zotero data directory", default=default_data_dir)
+        _prompt_value("Zotero data folder", default=default_data_dir)
     ).expanduser()
-    sqlite_path = Path(
-        _prompt_value("Zotero sqlite path", default=str(data_dir / "zotero.sqlite"))
-    ).expanduser()
-    storage_dir = Path(
-        _prompt_value("Zotero storage directory", default=str(data_dir / "storage"))
-    ).expanduser()
-
-    database_id = _prompt_value("Notion database ID (UUID)")
-    data_source_id = _prompt_value(
-        "Notion data source ID (UUID, optional)", default="", required=False
+    token_env = _prompt_value(
+        "Name to save your Notion token under", default="NOTION_TOKEN"
     )
-    pdf_property_name = _prompt_value("Notion files property name", default="PDF")
+    token_value = _prompt_value(
+        "Notion integration token (paste the full token)"
+    )
+
+    database_id = ""
+    data_source_id = ""
+    try:
+        notion = NotionClient(token=token_value, notion_version=LATEST_NOTION_VERSION)
+        try:
+            targets = notion.list_accessible_data_sources()
+        finally:
+            notion.close()
+        if len(targets) == 1:
+            selected = targets[0]
+            print(f"Discovered Notion database target: {selected.label}")
+            use_discovered = _prompt_value(
+                "Use this target? (yes/no)", default="yes"
+            )
+            if use_discovered.strip().lower() in {"y", "yes"}:
+                data_source_id = selected.data_source_id
+                database_id = selected.database_id
+        elif targets:
+            print("Notion database targets this integration can access:")
+            for idx, target in enumerate(targets, start=1):
+                print(f"{idx}) {target.label} [{target.data_source_id}]")
+            while not data_source_id:
+                raw_choice = _prompt_value(
+                    f"Choose a target number (1-{len(targets)})"
+                )
+                try:
+                    selection_index = int(raw_choice)
+                except ValueError:
+                    print("Enter a number from the list.")
+                    continue
+                if not (1 <= selection_index <= len(targets)):
+                    print("Enter a number from the list.")
+                    continue
+                selected = targets[selection_index - 1]
+                data_source_id = selected.data_source_id
+                database_id = selected.database_id
+        else:
+            print(
+                "No Notion database targets were discovered automatically for this integration. "
+                "Paste a Notion database URL/ID, or a data source URL/ID if you already have one."
+            )
+    except NotionApiError as exc:
+        print(f"Automatic Notion target discovery was skipped: {exc}")
+
+    while not database_id and not data_source_id:
+        database_id = _prompt_value(
+            "Notion database URL or ID", default="", required=False
+        )
+        data_source_id = _prompt_value(
+            "Notion data source URL or ID (optional)", default="", required=False
+        )
+        if not database_id and not data_source_id:
+            print("Paste a Notion database URL/ID, or a data source URL/ID.")
+
+    pdf_property_name = _prompt_value(
+        "Notion files property name for uploaded PDFs", default="PDF"
+    )
     zotero_uri_property_name = _prompt_value(
-        "Notion Zotero URI property name", default="Zotero URI"
+        "Notion property name used for Zotero URI matching", default="Zotero URI"
     )
-    token_env = _prompt_value("Notion token env var name", default="NOTION_TOKEN")
-
-    token_value = _prompt_value("Notion token (starts with secret_)")
     use_keyring = False
     if keyring_available():
-        ans = _prompt_value("Store token in OS keychain? (yes/no)", default="yes")
+        ans = _prompt_value(
+            "Store the token securely in your OS keychain? (yes/no)",
+            default="yes",
+        )
         use_keyring = ans.strip().lower() in {"y", "yes"}
 
     dry_run_default = "yes"
     dry_run_answer = _prompt_value(
-        "Start with dry-run enabled? (yes/no)", default=dry_run_default
+        "Start in preview mode so nothing is written yet? (yes/no)",
+        default=dry_run_default,
     )
     dry_run = dry_run_answer.strip().lower() in {"y", "yes"}
 
     text = render_setup_config(
         zotero_data_dir=data_dir,
-        sqlite_path=sqlite_path,
-        storage_dir=storage_dir,
         token_env=token_env,
         database_id=database_id,
         data_source_id=data_source_id,
         pdf_property_name=pdf_property_name,
         zotero_uri_property_name=zotero_uri_property_name,
         dry_run=dry_run,
-        state_db_path=state_db_path,
-        report_dir=report_dir,
-        log_dir=log_dir,
     )
 
     effective_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,10 +302,34 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     print("Next steps:")
     print("1) Run: noteropdf doctor")
     print("2) Run: noteropdf sync")
+    print("3) If the preview looks correct, turn off dry_run in config.yaml and run sync again")
     return 0
 
 
+def _check_supported_python() -> str | None:
+    major, minor = sys.version_info[:2]
+    version = (major, minor)
+    if version < MIN_PYTHON:
+        return (
+            "Unsupported Python version: "
+            f"{major}.{minor}. "
+            "Use Python 3.11, 3.12, or 3.13."
+        )
+    if version >= MAX_PYTHON_EXCLUSIVE:
+        return (
+            "Unsupported Python version: "
+            f"{major}.{minor}. "
+            "Use Python 3.11, 3.12, or 3.13."
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
+    python_error = _check_supported_python()
+    if python_error:
+        print(python_error, file=sys.stderr)
+        return 2
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -320,11 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Run log: %s", log_path)
     started = perf_counter()
 
-    if zotero_maybe_open() and args.command in {
-        "sync",
-        "rebuild-page-files",
-        "full-reset",
-    }:
+    if zotero_maybe_open() and args.command == "sync":
         logger.warning(
             "Zotero appears to be running. Read-only mode is used, but close Zotero for best consistency."
         )
@@ -338,46 +372,6 @@ def main(argv: list[str] | None = None) -> int:
                     logger.info(line)
                 return 0
 
-            if args.command == "support-bundle":
-                doctor_lines: list[str] | None = None
-                doctor_error: str | None = None
-                try:
-                    doctor_lines = engine.doctor()
-                except Exception as exc:
-                    doctor_error = str(exc)
-
-                requested_config = Path(args.config).expanduser().resolve()
-                requested_env = (
-                    env_for_load.expanduser().resolve()
-                    if env_for_load is not None
-                    else (Path(args.config).expanduser().resolve().parent / ".env")
-                )
-                fallback_config = get_default_config_path().expanduser().resolve()
-                fallback_env = get_default_env_path().expanduser().resolve()
-                effective_config = (
-                    requested_config
-                    if requested_config.exists()
-                    else (fallback_config if fallback_config.exists() else None)
-                )
-                effective_env = (
-                    requested_env
-                    if requested_env.exists()
-                    else (fallback_env if fallback_env.exists() else None)
-                )
-
-                bundle_path = build_support_bundle(
-                    cfg=cfg,
-                    output_dir=cfg.sync.report_dir,
-                    config_path=effective_config,
-                    env_path=effective_env,
-                    doctor_lines=doctor_lines,
-                    doctor_error=doctor_error,
-                    current_run_log=log_path,
-                )
-                logger.info("Support bundle created: %s", bundle_path)
-                logger.info("Share this zip for debugging. Secrets are redacted.")
-                return 0
-
             if args.command == "sync":
                 parent_count = engine.estimate_parent_item_count()
                 _print_write_preflight(
@@ -385,68 +379,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 rows = engine.sync(force=bool(args.force))
                 json_path, csv_path, summary_path = write_reports(
-                    cfg.sync.report_dir,
-                    "sync-force" if args.force else "sync",
-                    rows,
+                    cfg.sync.report_dir, "sync-force" if args.force else "sync", rows
                 )
                 _print_summary(rows)
-                logger.info("JSON report: %s", json_path)
-                logger.info("CSV report: %s", csv_path)
-                logger.info("Summary report: %s", summary_path)
-                logger.info("Elapsed seconds: %.2f", perf_counter() - started)
-                return 0
-
-            if args.command == "rebuild-page-files":
-                if not args.yes:
-                    logger.error("Refusing rebuild-page-files without --yes")
-                    return 2
-                page_count = engine.estimate_known_page_count()
-                _print_write_preflight(
-                    "rebuild-page-files",
-                    cfg.notion.pdf_property_name,
-                    page_count,
-                    cfg.sync.dry_run,
-                )
-                if not _confirm_destructive_action(
-                    action_label="rebuild-page-files",
-                    property_name=cfg.notion.pdf_property_name,
-                    page_count=page_count,
-                ):
-                    return 2
-                rows = engine.rebuild_page_files()
-                json_path, csv_path, summary_path = write_reports(
-                    cfg.sync.report_dir, "rebuild-page-files", rows
-                )
-                _print_summary(rows)
-                logger.info("JSON report: %s", json_path)
-                logger.info("CSV report: %s", csv_path)
-                logger.info("Summary report: %s", summary_path)
-                logger.info("Elapsed seconds: %.2f", perf_counter() - started)
-                return 0
-
-            if args.command == "full-reset":
-                if not args.yes:
-                    logger.error("Refusing full-reset without --yes")
-                    return 2
-                page_count = engine.estimate_known_page_count()
-                _print_write_preflight(
-                    "full-reset",
-                    cfg.notion.pdf_property_name,
-                    page_count,
-                    cfg.sync.dry_run,
-                )
-                if not _confirm_destructive_action(
-                    action_label="full-reset",
-                    property_name=cfg.notion.pdf_property_name,
-                    page_count=page_count,
-                ):
-                    return 2
-                rows = engine.full_reset()
-                json_path, csv_path, summary_path = write_reports(
-                    cfg.sync.report_dir, "full-reset", rows
-                )
-                _print_summary(rows)
-                logger.info("Local sync state cleared. Run 'sync' for a fresh rebuild.")
                 logger.info("JSON report: %s", json_path)
                 logger.info("CSV report: %s", csv_path)
                 logger.info("Summary report: %s", summary_path)

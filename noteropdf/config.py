@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import os
 import re
 import sys
@@ -10,7 +11,9 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 from platformdirs import (user_cache_path, user_config_path, user_data_path,
-                          user_log_path)
+                           user_log_path)
+
+from .util import normalize_notion_id_input, unescape_js_string_literal
 
 LATEST_NOTION_VERSION = "2026-03-11"
 ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
@@ -41,9 +44,6 @@ class SyncConfig:
     log_dir: Path
     log_level: str
     dry_run: bool
-    continue_on_error: bool
-    max_simple_upload_mb: int
-    max_supported_mb: int
 
 
 @dataclass(frozen=True)
@@ -60,13 +60,7 @@ TOKEN_KEYRING_SERVICE = "noteropdf"
 
 
 def _normalize_windows_uuidish(value: str) -> str:
-    compact = value.replace("-", "").strip().lower()
-    if re.fullmatch(r"[0-9a-f]{32}", compact):
-        return (
-            f"{compact[0:8]}-{compact[8:12]}-{compact[12:16]}-"
-            f"{compact[16:20]}-{compact[20:32]}"
-        )
-    return value.strip()
+    return normalize_notion_id_input(value)
 
 
 def get_default_config_path() -> Path:
@@ -108,7 +102,99 @@ def default_zotero_data_dir_candidates() -> list[Path]:
     return [home / "Zotero", home / ".zotero" / "zotero"]
 
 
+def default_zotero_profile_root_candidates() -> list[Path]:
+    home = Path.home()
+    if sys.platform == "win32":
+        appdata = os.getenv("APPDATA", "").strip()
+        if appdata:
+            return [Path(appdata) / "Zotero" / "Zotero"]
+        return [home / "AppData" / "Roaming" / "Zotero" / "Zotero"]
+    if sys.platform == "darwin":
+        return [home / "Library" / "Application Support" / "Zotero"]
+    return [home / ".zotero" / "zotero"]
+
+
+def _profile_paths_from_root(profile_root: Path) -> list[Path]:
+    profiles_ini = profile_root / "profiles.ini"
+    out: list[Path] = []
+    if profiles_ini.exists():
+        parser = configparser.RawConfigParser()
+        try:
+            parser.read(profiles_ini, encoding="utf-8")
+        except Exception:
+            parser = configparser.RawConfigParser()
+        for section in parser.sections():
+            if not section.lower().startswith("profile"):
+                continue
+            raw_path = parser.get(section, "Path", fallback="").strip()
+            if not raw_path:
+                continue
+            is_relative = parser.getboolean(section, "IsRelative", fallback=True)
+            profile_path = Path(raw_path)
+            if is_relative:
+                profile_path = profile_root / profile_path
+            out.append(profile_path)
+
+    if not out and profile_root.exists():
+        for child in profile_root.iterdir():
+            if child.is_dir() and (child / "prefs.js").exists():
+                out.append(child)
+            elif child.is_dir():
+                profiles_child = child / "Profiles"
+                if profiles_child.exists() and profiles_child.is_dir():
+                    out.extend(
+                        p for p in profiles_child.iterdir() if p.is_dir() and (p / "prefs.js").exists()
+                    )
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in out:
+        resolved = path.expanduser().resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(resolved)
+    return unique
+
+
+def _read_custom_zotero_data_dir(profile_dir: Path) -> Path | None:
+    prefs_path = profile_dir / "prefs.js"
+    if not prefs_path.exists():
+        return None
+    try:
+        text = prefs_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    use_custom_match = re.search(
+        r'user_pref\("extensions\.zotero\.useDataDir",\s*(true|false)\s*\);',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not use_custom_match or use_custom_match.group(1).lower() != "true":
+        return None
+
+    data_dir_match = re.search(
+        r'user_pref\("extensions\.zotero\.dataDir",\s*"((?:[^"\\]|\\.)*)"\s*\);',
+        text,
+    )
+    if not data_dir_match:
+        return None
+
+    raw_value = unescape_js_string_literal(data_dir_match.group(1)).strip()
+    if not raw_value:
+        return None
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = (profile_dir / path).resolve()
+    return path.resolve()
+
+
 def detect_zotero_data_dir() -> Path | None:
+    for profile_root in default_zotero_profile_root_candidates():
+        for profile_dir in _profile_paths_from_root(profile_root):
+            custom_dir = _read_custom_zotero_data_dir(profile_dir)
+            if custom_dir and custom_dir.exists() and custom_dir.is_dir():
+                return custom_dir
     for candidate in default_zotero_data_dir_candidates():
         if candidate.exists() and candidate.is_dir():
             return candidate.resolve()
@@ -118,43 +204,26 @@ def detect_zotero_data_dir() -> Path | None:
 def render_setup_config(
     *,
     zotero_data_dir: Path,
-    sqlite_path: Path,
-    storage_dir: Path,
     token_env: str,
     database_id: str,
     data_source_id: str,
     pdf_property_name: str,
     zotero_uri_property_name: str,
-    doi_property_name: str = "DOI",
     dry_run: bool,
-    state_db_path: Path,
-    report_dir: Path,
-    log_dir: Path,
 ) -> str:
     payload = {
         "zotero": {
             "data_dir": str(zotero_data_dir),
-            "sqlite_path": str(sqlite_path),
-            "storage_dir": str(storage_dir),
         },
         "notion": {
             "token_env": token_env,
-            "notion_version": LATEST_NOTION_VERSION,
             "database_id": _normalize_windows_uuidish(database_id),
             "data_source_id": _normalize_windows_uuidish(data_source_id),
             "pdf_property_name": pdf_property_name,
             "zotero_uri_property_name": zotero_uri_property_name,
-            "doi_property_name": doi_property_name,
         },
         "sync": {
-            "state_db_path": str(state_db_path),
-            "report_dir": str(report_dir),
-            "log_dir": str(log_dir),
-            "log_level": "INFO",
             "dry_run": bool(dry_run),
-            "continue_on_error": False,
-            "max_simple_upload_mb": 20,
-            "max_supported_mb": 20,
         },
     }
     return yaml.safe_dump(payload, sort_keys=False)
@@ -208,16 +277,6 @@ def _resolve_path(base_dir: Path, value: str) -> Path:
     if p.is_absolute():
         return p.resolve()
     return (base_dir / p).resolve()
-
-
-def _require_positive_int(name: str, value: Any) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Config value '{name}' must be an integer") from exc
-    if parsed <= 0:
-        raise ValueError(f"Config value '{name}' must be > 0")
-    return parsed
 
 
 def _require_bool(name: str, value: Any, default: bool) -> bool:
@@ -294,10 +353,15 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
     notion_raw = raw.get("notion") or {}
     sync_raw = raw.get("sync") or {}
 
+    zotero_data_dir = _resolve_path(base_dir, _require_str(zotero_raw, "data_dir"))
     zotero = ZoteroConfig(
-        data_dir=_resolve_path(base_dir, _require_str(zotero_raw, "data_dir")),
-        sqlite_path=_resolve_path(base_dir, _require_str(zotero_raw, "sqlite_path")),
-        storage_dir=_resolve_path(base_dir, _require_str(zotero_raw, "storage_dir")),
+        data_dir=zotero_data_dir,
+        sqlite_path=_resolve_path(
+            base_dir, str(zotero_raw.get("sqlite_path") or zotero_data_dir / "zotero.sqlite")
+        ),
+        storage_dir=_resolve_path(
+            base_dir, str(zotero_raw.get("storage_dir") or zotero_data_dir / "storage")
+        ),
     )
 
     notion_version = str(
@@ -312,7 +376,9 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
     notion = NotionConfig(
         token_env=_require_str(notion_raw, "token_env"),
         notion_version=notion_version,
-        database_id=_normalize_windows_uuidish(_require_str(notion_raw, "database_id")),
+        database_id=_normalize_windows_uuidish(
+            str(notion_raw.get("database_id") or "").strip()
+        ),
         data_source_id=_normalize_windows_uuidish(
             str(notion_raw.get("data_source_id") or "").strip()
         ),
@@ -320,7 +386,12 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
         zotero_uri_property_name=_require_str(notion_raw, "zotero_uri_property_name"),
         doi_property_name=str(notion_raw.get("doi_property_name") or "DOI").strip(),
     )
-    _validate_notion_id("notion.database_id", notion.database_id)
+    if not notion.database_id and not notion.data_source_id:
+        raise ValueError(
+            "Set notion.database_id or notion.data_source_id in config.yaml."
+        )
+    if notion.database_id:
+        _validate_notion_id("notion.database_id", notion.database_id)
     if notion.data_source_id:
         _validate_notion_id("notion.data_source_id", notion.data_source_id)
 
@@ -354,22 +425,7 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
         ),
         log_level=str(sync_raw.get("log_level", "INFO")).strip().upper(),
         dry_run=_require_bool("sync.dry_run", sync_raw.get("dry_run"), False),
-        continue_on_error=_require_bool(
-            "sync.continue_on_error",
-            sync_raw.get("continue_on_error"),
-            False,
-        ),
-        max_simple_upload_mb=_require_positive_int(
-            "sync.max_simple_upload_mb", sync_raw.get("max_simple_upload_mb", 20)
-        ),
-        max_supported_mb=_require_positive_int(
-            "sync.max_supported_mb", sync_raw.get("max_supported_mb", 20)
-        ),
     )
-    if sync.max_simple_upload_mb > sync.max_supported_mb:
-        raise ValueError(
-            "sync.max_simple_upload_mb cannot be greater than sync.max_supported_mb"
-        )
     if sync.log_level not in ALLOWED_LOG_LEVELS:
         allowed = ", ".join(sorted(ALLOWED_LOG_LEVELS))
         raise ValueError(f"sync.log_level must be one of: {allowed}")

@@ -4,6 +4,7 @@ import hashlib
 import re
 import subprocess
 import sys
+from ast import literal_eval
 from pathlib import Path
 
 
@@ -33,6 +34,21 @@ def parse_notion_page_id_from_url(url: str) -> str | None:
 
     value = compact.group(1).lower()
     return f"{value[0:8]}-{value[8:12]}-{value[12:16]}-{value[16:20]}-{value[20:32]}"
+
+
+def normalize_notion_id_input(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    parsed = parse_notion_page_id_from_url(raw)
+    return parsed or raw
+
+
+def unescape_js_string_literal(value: str) -> str:
+    try:
+        return literal_eval(f'"{value}"')
+    except (SyntaxError, ValueError):
+        return value
 
 
 def zotero_maybe_open() -> bool:
