@@ -130,7 +130,9 @@ def _print_write_preflight(
 
 
 def _prompt_value(
-    prompt: str, default: str | None = None, required: bool = True
+    prompt: str,
+    default: str | None = None,
+    required: bool = True,
 ) -> str:
     while True:
         suffix = f" [{default}]" if default is not None else ""
@@ -144,6 +146,31 @@ def _prompt_value(
         print("This value is required.")
 
 
+def _prompt_yes_no(
+    prompt: str,
+    *,
+    default_yes: bool = True,
+    yes_means: str | None = None,
+    no_means: str | None = None,
+) -> bool:
+    default = "yes" if default_yes else "no"
+    display = prompt
+    if yes_means or no_means:
+        parts: list[str] = []
+        if yes_means:
+            parts.append(f"yes = {yes_means}")
+        if no_means:
+            parts.append(f"no = {no_means}")
+        display = f"{prompt} ({'; '.join(parts)})"
+    while True:
+        answer = _prompt_value(display, default=default).strip().lower()
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer 'yes' or 'no'.")
+
+
 def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     default_cfg_path = get_default_config_path()
     default_env_path = get_default_env_path()
@@ -155,27 +182,35 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     if env_path == Path(".env"):
         effective_env_path = default_env_path
 
+    print("NoteroPDF setup")
+    print("This wizard helps you connect Zotero and Notion in a few short steps.")
+    print("Press Enter to accept the default shown in [brackets].")
+
     if effective_config_path.exists() and not force_overwrite:
         print(f"Config already exists at: {effective_config_path}")
-        yn = _prompt_value("Replace the existing saved setup? (yes/no)", default="no")
-        if yn.strip().lower() not in {"y", "yes"}:
+        if not _prompt_yes_no("Replace the existing saved setup?", default_yes=False):
             print("Setup cancelled.")
             return 2
 
     detected = detect_zotero_data_dir()
     default_data_dir = str(detected) if detected else str(Path.home() / "Zotero")
+    print("\nStep 1 of 4: Zotero")
     data_dir = Path(
         _prompt_value("Zotero data folder", default=default_data_dir)
     ).expanduser()
+
+    print("\nStep 2 of 4: Notion token")
     token_env = _prompt_value(
-        "Name to save your Notion token under", default="NOTION_TOKEN"
+        "Name to save your Notion token under (environment key)",
+        default="NOTION_TOKEN",
     )
     token_value = _prompt_value(
-        "Notion integration token (paste the full token)"
+        "Notion integration token (paste the full token, starts with ntn_)"
     )
 
     database_id = ""
     data_source_id = ""
+    print("\nStep 3 of 4: Notion target")
     try:
         notion = NotionClient(token=token_value, notion_version=LATEST_NOTION_VERSION)
         try:
@@ -184,15 +219,12 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
             notion.close()
         if len(targets) == 1:
             selected = targets[0]
-            print(f"Discovered Notion database target: {selected.label}")
-            use_discovered = _prompt_value(
-                "Use this target? (yes/no)", default="yes"
-            )
-            if use_discovered.strip().lower() in {"y", "yes"}:
+            print(f"Found one accessible Notion target: {selected.label}")
+            if _prompt_yes_no("Use this target?", default_yes=True):
                 data_source_id = selected.data_source_id
                 database_id = selected.database_id
         elif targets:
-            print("Notion database targets this integration can access:")
+            print("Choose one of the Notion targets this integration can access:")
             for idx, target in enumerate(targets, start=1):
                 print(f"{idx}) {target.label} [{target.data_source_id}]")
             while not data_source_id:
@@ -212,7 +244,7 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
                 database_id = selected.database_id
         else:
             print(
-                "No Notion database targets were discovered automatically for this integration. "
+                "No Notion targets were discovered automatically for this integration. "
                 "Paste a Notion database URL/ID, or a data source URL/ID if you already have one."
             )
     except NotionApiError as exc:
@@ -228,6 +260,7 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
         if not database_id and not data_source_id:
             print("Paste a Notion database URL/ID, or a data source URL/ID.")
 
+    print("\nStep 4 of 4: Field mapping")
     pdf_property_name = _prompt_value(
         "Notion files property name for uploaded PDFs", default="PDF"
     )
@@ -236,18 +269,17 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     )
     use_keyring = False
     if keyring_available():
-        ans = _prompt_value(
-            "Store the token securely in your OS keychain? (yes/no)",
-            default="yes",
+        use_keyring = _prompt_yes_no(
+            "Store the token securely in your OS keychain?",
+            default_yes=True,
         )
-        use_keyring = ans.strip().lower() in {"y", "yes"}
 
-    dry_run_default = "yes"
-    dry_run_answer = _prompt_value(
-        "Start in preview mode so nothing is written yet? (yes/no)",
-        default=dry_run_default,
+    dry_run = _prompt_yes_no(
+        "Start in preview mode?",
+        default_yes=True,
+        yes_means="safe preview (no Notion changes)",
+        no_means="live mode (writes to Notion)",
     )
-    dry_run = dry_run_answer.strip().lower() in {"y", "yes"}
 
     text = render_setup_config(
         zotero_data_dir=data_dir,
@@ -302,7 +334,14 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
     print("Next steps:")
     print("1) Run: noteropdf doctor")
     print("2) Run: noteropdf sync")
-    print("3) If the preview looks correct, turn off dry_run in config.yaml and run sync again")
+    if dry_run:
+        print(
+            f"3) If the preview looks correct, set dry_run: false in {effective_config_path} and run sync again"
+        )
+    else:
+        print(
+            "3) You are live now (dry_run is off). Re-run sync anytime to apply new changes."
+        )
     return 0
 
 
