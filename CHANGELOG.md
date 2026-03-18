@@ -1,27 +1,31 @@
 # Changelog
 
+All notable changes to this project will be documented in this file.
+
+## 0.2.0 - 2026-03-18
+
+### Added
+
+- guided Notion target discovery during `setup` using the provided integration token
+- stronger Zotero data-directory detection across Windows, macOS, and Linux
+- multipart upload support for larger PDFs when the Notion workspace supports it
+- published standalone GitHub Release bundles for Windows, macOS, and Linux
+- installed-artifact smoke checks in CI and release validation
+
+### Changed
+
+- simplified the public CLI to `setup`, `doctor`, and `sync`
+- reduced the default config surface to the fields a normal user is expected to edit
+- made `sync` repair common Notion PDF-field drift instead of silently skipping it
+- clarified setup and release docs around bundle installs, best-effort discovery, and dry-run validation
+
+### Removed
+
+- destructive recovery commands from the public CLI
+- support-bundle command and its related maintenance complexity
+
 ## 0.1.0 - 2026-03-15
 
 ### Added
-- Two-step confirmation flow for destructive commands (`rebuild-page-files --yes`, `full-reset --yes`).
-- Write preflight output before commands that may update Notion.
-- Stronger safety reporting in `doctor`, including explicit Zotero read-only guarantees.
-- New status coverage and user guidance for `STATE_SAVE_FAILED` and `NOTION_NETWORK_ERROR`.
-- CI workflow for tests and package build smoke checks.
-- New `setup` command for first-run guided configuration.
-- New `support-bundle` command to export a sanitized diagnostics zip.
-- Optional OS keychain token support via `keyring`.
-- Platform-aware default paths for config/state/reports/logs via `platformdirs`.
-- GitHub release workflow that builds and uploads wheel/sdist artifacts when a `v*` tag is pushed.
-- Release checklist for safer public releases.
 
-### Changed
-- Clearer non-technical command output: "what happened" + "what to do next" summary blocks.
-- Improved Notion API error mapping with user-action hints.
-- Extra config sanity checks (token quality, log level validation, duplicate property field guard).
-- CI test workflow now runs on Linux, macOS, and Windows.
-- Debugging workflow now includes one-command diagnostics export for easier support.
-
-### Safety Notes
-- Zotero remains strictly read-only (`mode=ro&immutable=1`) and query-guarded.
-- Sync behavior remains deterministic and does not use fuzzy matching.
+- initial public release

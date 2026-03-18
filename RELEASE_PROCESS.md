@@ -1,122 +1,61 @@
 # Release Process
 
-This is the standard operating process for publishing NoteroPDF releases.
-Use this flow for every release to keep versioning, changelog updates, and GitHub releases consistent.
+Use this process for every release.
 
-## Goals
+## 1. Update release files
 
-- Keep each release repeatable and low-risk.
-- Use one clear source of truth for version and notes.
-- Minimize manual decisions during publish.
+- bump `version` in `pyproject.toml`
+- add a short entry to `CHANGELOG.md`
 
-## Versioning Rules
+## 2. Verify locally
 
-Use semantic versioning: `MAJOR.MINOR.PATCH`.
-
-- `PATCH`: bug fixes, docs-only fixes, small safe improvements.
-- `MINOR`: new backward-compatible features.
-- `MAJOR`: breaking changes.
-
-Examples: `0.1.1`, `0.2.0`, `1.0.0`.
-
-## Standard Release Flow
-
-Run from repository root.
-
-1. Choose the new version and export it:
+Use a clean virtual environment. The intended maintainer path is plain `venv` plus `pip`, not conda, poetry, or pipenv.
 
 ```bash
-export VERSION=0.1.1
-```
-
-2. Update version metadata:
-
-- Update `pyproject.toml` version to `${VERSION}`.
-- Add a new section in `CHANGELOG.md` using the format:
-  - `## ${VERSION} - YYYY-MM-DD`
-  - include `Added`, `Changed`, `Fixed` sections when relevant.
-
-3. Run quality gates:
-
-```bash
+python -m venv .venv
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e ".[dev]"
 python -m pytest -q
 python -m build
-python -m noteropdf doctor
+python -m pip install --force-reinstall ./dist/noteropdf-X.Y.Z-py3-none-any.whl
+python -m noteropdf --help
+pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py
 ```
 
-4. Verify docs and safety checks:
+Use Python 3.12 for the standalone bundle build so local release packaging matches CI.
+Treat the local PyInstaller build as a smoke check. Official release bundles should be produced by GitHub Actions on pinned runners.
+Replace `X.Y.Z` with the version you just built. Using the explicit wheel filename keeps the command valid in both PowerShell and POSIX shells.
 
-- Confirm README commands still match current CLI behavior.
-- Confirm no secrets or local paths are committed.
-- Run all checks in `RELEASE_CHECKLIST.md`.
-
-5. Commit release changes:
+Then verify a real setup:
 
 ```bash
-git add pyproject.toml CHANGELOG.md README.md RELEASE_CHECKLIST.md RELEASE_PROCESS.md
-git commit -m "release: v${VERSION}"
+noteropdf setup
+noteropdf doctor
+noteropdf sync
 ```
 
-6. Create annotated tag:
+Also verify one common repair case on a real workspace by clearing or mismatching a Notion PDF field and confirming a later `noteropdf sync` run restores it.
+
+## 3. Publish
 
 ```bash
-git tag -a "v${VERSION}" -m "Release v${VERSION}"
-```
-
-7. Push branch and tag:
-
-```bash
+git add .
+git commit -m "release: vX.Y.Z"
+git tag -a "vX.Y.Z" -m "Release vX.Y.Z"
 git push origin main
-git push origin "v${VERSION}"
+git push origin "vX.Y.Z"
 ```
 
-8. Verify GitHub release pipeline:
+## 4. Confirm GitHub artifacts
 
-- Confirm release workflow succeeds for tag `v${VERSION}`.
-- Confirm both artifacts exist: wheel (`.whl`) and source (`.tar.gz`).
-- Publish/verify GitHub release notes.
+The GitHub Release page should contain:
 
-9. Smoke-test install from GitHub release:
-
-```bash
-python -m pip install "https://github.com/diyanko/NoteroPDF/releases/download/v${VERSION}/noteropdf-${VERSION}-py3-none-any.whl"
-noteropdf --help
-```
-
-## Hotfix Flow
-
-For urgent fixes:
-
-1. Branch from `main`.
-2. Apply minimal fix.
-3. Add/adjust tests.
-4. Bump `PATCH` version only.
-5. Follow the same Standard Release Flow.
-
-## If You Need to Re-Tag Before Publish
-
-Only do this if release artifacts are not yet published and you intentionally need to recreate the tag.
-
-```bash
-git tag -d "v${VERSION}"
-git push origin ":refs/tags/v${VERSION}"
-git tag -a "v${VERSION}" -m "Release v${VERSION}"
-git push origin "v${VERSION}"
-```
-
-## Release Notes Template
-
-Use this in `CHANGELOG.md`:
-
-```md
-## X.Y.Z - YYYY-MM-DD
-
-### Added
-- ...
-
-### Changed
-- ...
-
-### Fixed
-- ...
-```
+- wheel
+- source tarball
+- standalone Windows bundle zip
+- standalone macOS bundle zip
+- standalone Linux bundle zip

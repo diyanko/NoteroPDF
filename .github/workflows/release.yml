@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build-dists:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,22 +18,99 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build
+          python -m pip install ".[dev]"
 
       - name: Build distributions
         run: python -m build
+
+      - name: Smoke test built wheel
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -m noteropdf --help
+
+      - name: Upload Python distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  build-bundles:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_suffix: linux
+          - os: macos-latest
+            asset_suffix: macos
+          - os: windows-latest
+            asset_suffix: windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install bundle tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[dev]"
+
+      - name: Build standalone bundle
+        run: pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py
+
+      - name: Smoke test standalone bundle
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            ./dist/noteropdf/noteropdf.exe --help
+          else
+            ./dist/noteropdf/noteropdf --help
+          fi
+
+      - name: Archive standalone bundle
+        env:
+          BUNDLE_SUFFIX: ${{ matrix.asset_suffix }}
+        run: >
+          python -c "import os, pathlib, shutil;
+          root = pathlib.Path('dist/noteropdf');
+          archive_base = pathlib.Path('dist') / ('noteropdf-' + os.environ['BUNDLE_SUFFIX']);
+          print(shutil.make_archive(str(archive_base), 'zip', root_dir=root.parent, base_dir=root.name))"
+
+      - name: Upload standalone bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: noteropdf-bundle-${{ matrix.asset_suffix }}
+          path: dist/noteropdf-${{ matrix.asset_suffix }}.zip
+
+  publish-release:
+    runs-on: ubuntu-latest
+    needs:
+      - build-dists
+      - build-bundles
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
 
       - name: Publish GitHub release with artifacts
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*.whl
-            dist/*.tar.gz
+            release-artifacts/**/*.whl
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip
           generate_release_notes: true
           draft: false
           prerelease: false

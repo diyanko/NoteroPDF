@@ -1,32 +1,38 @@
 # Release Checklist
 
-Use this checklist together with `RELEASE_PROCESS.md`.
+Use this with `RELEASE_PROCESS.md`.
 
-## 1. Prepare
-- [ ] Decide version (`MAJOR.MINOR.PATCH`) and set `VERSION`.
-- [ ] Update `pyproject.toml` version.
-- [ ] Add a new dated section in `CHANGELOG.md`.
+## Pre-release
 
-## 2. Validate
-- [ ] `python -m pytest -q` passes.
-- [ ] `python -m build` succeeds.
-- [ ] `python -m noteropdf doctor` passes on a real setup.
-- [ ] Run one dry-run sync and review reports.
-- [ ] Run one real sync and confirm expected rows only.
-- [ ] Confirm destructive command confirmation prompts work.
+- [ ] Start from a clean virtual environment
+- [ ] `python -m pip install -e ".[dev]"`
+- [ ] Update the version in `pyproject.toml`
+- [ ] Update `CHANGELOG.md`
+- [ ] `python -m pytest -q`
+- [ ] `python -m build`
+- [ ] Use Python 3.12 for the bundle build
+- [ ] `pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py`
+- [ ] Treat the local PyInstaller build as a smoke check only
+- [ ] Install the built wheel by explicit filename and run `python -m noteropdf --help`
 
-## 3. Docs and Safety
-- [ ] README commands and examples still match current CLI behavior.
-- [ ] No secrets or personal paths in tracked files.
-- [ ] User-facing messages remain clear and non-technical.
+## Real-world check
 
-## 4. Publish
-- [ ] Commit release files with a release commit message.
-- [ ] Create annotated tag `v${VERSION}`.
-- [ ] Push `main` and the tag.
-- [ ] Verify GitHub release workflow succeeds.
-- [ ] Verify release artifacts include `.whl` and `.tar.gz`.
-- [ ] Publish/verify GitHub release notes.
+- [ ] Run `noteropdf setup` on a real machine
+- [ ] Run `noteropdf doctor`
+- [ ] Run one dry-run sync
+- [ ] Run one real sync against a real Zotero + Notion setup
+- [ ] Confirm `sync` repairs a common drift case by clearing or mismatching one Notion PDF field and rerunning
 
-## 5. Post-Publish
-- [ ] Install from released wheel URL and run `noteropdf --help` smoke test.
+## Docs and packaging
+
+- [ ] README still matches the actual CLI
+- [ ] No secrets or machine-specific paths are committed
+- [ ] GitHub Actions release workflow produced wheel, sdist, and standalone Windows/macOS/Linux bundles
+
+## Publish
+
+- [ ] Commit release changes
+- [ ] Tag `vX.Y.Z`
+- [ ] Push branch and tag
+- [ ] Verify the GitHub release artifacts and notes
+- [ ] Verify the GitHub release page contains the wheel, source tarball, and all standalone bundle zip assets

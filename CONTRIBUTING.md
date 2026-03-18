@@ -20,23 +20,41 @@ This project is built for reliability first. If you contribute, please prioritiz
 
 ## Local setup
 
-1. Install dependencies:
+Use a plain Python `venv` plus `pip`. Do not assume conda, poetry, pipenv, or pyenv.
+
+1. Create and activate a virtual environment:
 
 ```bash
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+python -m venv .venv
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+# macOS/Linux
+source .venv/bin/activate
 ```
 
-2. Run tests:
+2. Install dependencies:
+
+```bash
+python -m pip install -U pip
+python -m pip install -e ".[dev]"
+```
+
+3. Run tests:
 
 ```bash
 python -m pytest -q
 ```
 
-3. (Optional) Run CLI help check:
+4. (Optional) Run CLI help check:
 
 ```bash
-python -m noteropdf --help
+noteropdf --help
+```
+
+5. (Optional) Build a standalone bundle:
+
+```bash
+pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py
 ```
 
 ## Pull request expectations
@@ -66,6 +84,8 @@ Before opening a PR:
 - Keep matching behavior deterministic.
 - Avoid destructive behavior by default.
 - Keep user-facing language plain and direct.
+- Treat `setup`, `doctor`, and `sync` as the public CLI surface.
+- Prefer making `sync` self-heal common remote drift instead of adding more user-facing recovery commands.
 
 ### AI-assisted development policy
 
