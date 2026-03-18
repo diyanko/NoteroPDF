@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.2.1 - 2026-03-18
+
+### Fixed
+
+- accepted `collection://...` Notion data-source URLs even when pasted into the setup database prompt
+- normalized setup target IDs before writing config output to avoid malformed values
+- made default-config fallback apply only when `--config` was not explicitly passed
+
 ## 0.2.0 - 2026-03-18
 
 ### Added

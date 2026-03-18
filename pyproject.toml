@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noteropdf"
-version = "0.2.0"
+version = "0.2.1"
 description = "Deterministic local Zotero PDF to Notion files-property sync CLI"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
