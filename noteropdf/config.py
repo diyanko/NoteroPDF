@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 from platformdirs import (user_cache_path, user_config_path, user_data_path,
                            user_log_path)
 
-from .util import normalize_notion_id_input, unescape_js_string_literal
+from .util import (normalize_notion_id_input, normalize_notion_target_inputs,
+                   unescape_js_string_literal)
 
 LATEST_NOTION_VERSION = "2026-03-11"
 ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
@@ -211,14 +212,17 @@ def render_setup_config(
     zotero_uri_property_name: str,
     dry_run: bool,
 ) -> str:
+    normalized_database_id, normalized_data_source_id = normalize_notion_target_inputs(
+        database_id, data_source_id
+    )
     payload = {
         "zotero": {
             "data_dir": str(zotero_data_dir),
         },
         "notion": {
             "token_env": token_env,
-            "database_id": _normalize_windows_uuidish(database_id),
-            "data_source_id": _normalize_windows_uuidish(data_source_id),
+            "database_id": normalized_database_id,
+            "data_source_id": normalized_data_source_id,
             "pdf_property_name": pdf_property_name,
             "zotero_uri_property_name": zotero_uri_property_name,
         },
@@ -316,19 +320,23 @@ def _resolve_notion_token(token_env: str) -> tuple[str, str]:
     return "", "missing"
 
 
-def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
+def load_config(
+    config_path: Path,
+    env_path: Path | None = None,
+    *,
+    allow_default_config_fallback: bool = False,
+) -> AppConfig:
     requested_config_path = config_path.expanduser().resolve()
-    # Check if the user provided the default "config.yaml" filename
-    if (
-        requested_config_path.name == "config.yaml"
-        and not requested_config_path.exists()
-    ):
+    if allow_default_config_fallback and not requested_config_path.exists():
         default_config = get_default_config_path()
         config_path = (
             default_config if default_config.exists() else requested_config_path
         )
     else:
         config_path = requested_config_path
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path}")
 
     if env_path is None:
         # First check if there's a .env in the config's directory
@@ -342,9 +350,6 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
         env_path = env_path.expanduser().resolve()
     if env_path.exists():
         load_dotenv(env_path)
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
 
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     base_dir = config_path.parent

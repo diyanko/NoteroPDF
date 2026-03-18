@@ -235,6 +235,47 @@ def test_setup_falls_back_to_manual_target_entry_when_discovery_returns_none(
     assert "database_id: 3180e681-3c44-8198-9a97-e4532809e30e" in cfg_text
 
 
+def test_setup_accepts_collection_url_in_database_prompt(monkeypatch, tmp_path: Path):
+    cfg_path = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    data_dir = tmp_path / "Zotero"
+
+    answers = iter(
+        [
+            str(data_dir),
+            "",
+            "secret_test_token_that_is_long_enough_12345",
+            "collection://cc60e681-3c44-83c3-a31e-878c0824d6ac",
+            "",
+            "",
+            "",
+            "yes",
+        ]
+    )
+
+    class FakeNotionClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def list_accessible_data_sources(self):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
+    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
+    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
+    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
+
+    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
+
+    assert code == 0
+    cfg_text = cfg_path.read_text(encoding="utf-8")
+    assert "database_id: ''" in cfg_text
+    assert "data_source_id: cc60e681-3c44-83c3-a31e-878c0824d6ac" in cfg_text
+
+
 def test_setup_falls_back_to_manual_target_entry_on_discovery_error(
     monkeypatch, tmp_path: Path
 ):
@@ -399,8 +440,11 @@ def test_doctor_command_runs_and_returns_zero(monkeypatch):
     )
     calls: dict[str, object] = {}
 
-    def _fake_load_config(config_path, env_path):
+    def _fake_load_config(
+        config_path, env_path, *, allow_default_config_fallback=False
+    ):
         calls["env_path"] = env_path
+        calls["allow_default_config_fallback"] = allow_default_config_fallback
         return cfg
 
     monkeypatch.setattr("noteropdf.cli.load_config", _fake_load_config)
@@ -410,6 +454,42 @@ def test_doctor_command_runs_and_returns_zero(monkeypatch):
     code = main(["doctor"])
     assert code == 0
     assert calls["env_path"] is None
+    assert calls["allow_default_config_fallback"] is True
+
+
+def test_doctor_command_treats_explicit_config_flag_as_explicit_path(monkeypatch):
+    class FakeEngine:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def doctor(self):
+            return ["ok"]
+
+        def close(self):
+            return None
+
+    cfg = SimpleNamespace(
+        sync=SimpleNamespace(
+            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
+        ),
+        notion=SimpleNamespace(pdf_property_name="PDF"),
+    )
+    calls: dict[str, object] = {}
+
+    def _fake_load_config(
+        config_path, env_path, *, allow_default_config_fallback=False
+    ):
+        calls["allow_default_config_fallback"] = allow_default_config_fallback
+        return cfg
+
+    monkeypatch.setattr("noteropdf.cli.load_config", _fake_load_config)
+    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
+    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
+
+    code = main(["--config", "config.yaml", "doctor"])
+
+    assert code == 0
+    assert calls["allow_default_config_fallback"] is False
 
 
 def test_sync_command_runs_with_preflight_and_reports(monkeypatch):
@@ -445,7 +525,7 @@ def test_sync_command_runs_with_preflight_and_reports(monkeypatch):
         ),
         notion=SimpleNamespace(pdf_property_name="PDF"),
     )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_: cfg)
+    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
     monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
@@ -480,7 +560,7 @@ def test_sync_command_passes_force_to_engine(monkeypatch):
         notion=SimpleNamespace(pdf_property_name="PDF"),
     )
 
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_: cfg)
+    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
     monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)

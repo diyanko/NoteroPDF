@@ -44,6 +44,24 @@ def normalize_notion_id_input(value: str) -> str:
     return parsed or raw
 
 
+def is_notion_data_source_input(value: str) -> bool:
+    return value.strip().lower().startswith("collection://")
+
+
+def normalize_notion_target_inputs(
+    database_input: str, data_source_input: str
+) -> tuple[str, str]:
+    raw_database = database_input.strip()
+    raw_data_source = data_source_input.strip()
+
+    if not raw_data_source and is_notion_data_source_input(raw_database):
+        raw_database, raw_data_source = "", raw_database
+
+    return normalize_notion_id_input(raw_database), normalize_notion_id_input(
+        raw_data_source
+    )
+
+
 def unescape_js_string_literal(value: str) -> str:
     try:
         return literal_eval(f'"{value}"')

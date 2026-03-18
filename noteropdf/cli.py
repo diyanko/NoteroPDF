@@ -16,7 +16,7 @@ from .logging_setup import setup_run_logging
 from .notion_client import NotionApiError, NotionClient
 from .reporting import write_reports
 from .sync_engine import SyncEngine
-from .util import zotero_maybe_open
+from .util import normalize_notion_target_inputs, zotero_maybe_open
 
 MIN_PYTHON = (3, 11)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
@@ -279,11 +279,14 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
         print(f"Automatic Notion target discovery was skipped: {exc}")
 
     while not database_id and not data_source_id:
-        database_id = _prompt_value(
+        raw_database_id = _prompt_value(
             "Notion database URL or ID", default="", required=False
         )
-        data_source_id = _prompt_value(
+        raw_data_source_id = _prompt_value(
             "Notion data source URL or ID (optional)", default="", required=False
+        )
+        database_id, data_source_id = normalize_notion_target_inputs(
+            raw_database_id, raw_data_source_id
         )
         if not database_id and not data_source_id:
             print("Paste a Notion database URL/ID, or a data source URL/ID.")
@@ -397,8 +400,12 @@ def main(argv: list[str] | None = None) -> int:
         print(python_error, file=sys.stderr)
         return 2
 
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    explicit_config_arg = any(
+        arg == "--config" or arg.startswith("--config=") for arg in raw_argv
+    )
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
 
     if args.command == "setup":
         config_path = Path(args.config)
@@ -415,7 +422,13 @@ def main(argv: list[str] | None = None) -> int:
     env_for_load: Path | None = None if args.env == ".env" else Path(args.env)
 
     try:
-        cfg = load_config(Path(args.config), env_for_load)
+        cfg = load_config(
+            Path(args.config),
+            env_for_load,
+            allow_default_config_fallback=(
+                args.config == "config.yaml" and not explicit_config_arg
+            ),
+        )
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2

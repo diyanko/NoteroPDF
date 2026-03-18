@@ -3,7 +3,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from noteropdf.util import parse_notion_page_id_from_url, zotero_maybe_open
+from noteropdf.util import (normalize_notion_target_inputs,
+                            parse_notion_page_id_from_url, zotero_maybe_open)
 
 
 def test_parse_canonical_uuid_from_url():
@@ -18,6 +19,15 @@ def test_parse_compact_notion_id_from_url():
 
 def test_parse_invalid_url_returns_none():
     assert parse_notion_page_id_from_url("https://example.com/no-id-here") is None
+
+
+def test_normalize_notion_target_inputs_moves_collection_url_to_data_source():
+    database_id, data_source_id = normalize_notion_target_inputs(
+        "collection://12345678-1234-1234-1234-1234567890ab", ""
+    )
+
+    assert database_id == ""
+    assert data_source_id == "12345678-1234-1234-1234-1234567890ab"
 
 
 @pytest.fixture

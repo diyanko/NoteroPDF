@@ -298,7 +298,24 @@ def test_load_config_uses_default_config_and_env_when_requested_path_is_missing(
     monkeypatch.setattr("noteropdf.config.get_default_config_path", lambda: default_config)
     monkeypatch.setattr("noteropdf.config.get_default_env_path", lambda: default_env)
 
-    cfg = load_config(Path("config.yaml"))
+    cfg = load_config(Path("config.yaml"), allow_default_config_fallback=True)
 
     assert cfg.notion_token == VALID_TOKEN
     assert cfg.zotero.data_dir == (default_config.parent / "zotero").resolve()
+
+
+def test_load_config_does_not_use_default_config_for_explicit_missing_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    default_config = tmp_path / "app-config" / "config.yaml"
+    default_config.parent.mkdir(parents=True)
+    default_config.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    default_env = tmp_path / "app-config" / ".env"
+    default_env.write_text(f"NOTION_TOKEN={VALID_TOKEN}\n", encoding="utf-8")
+    missing_config = tmp_path / "custom" / "config.yaml"
+
+    monkeypatch.setattr("noteropdf.config.get_default_config_path", lambda: default_config)
+    monkeypatch.setattr("noteropdf.config.get_default_env_path", lambda: default_env)
+
+    with pytest.raises(FileNotFoundError, match="custom"):
+        load_config(missing_config)
