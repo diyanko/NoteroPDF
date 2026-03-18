@@ -133,10 +133,32 @@ def _prompt_value(
     prompt: str,
     default: str | None = None,
     required: bool = True,
+    options: tuple[str, ...] | None = None,
 ) -> str:
+    normalized_options = tuple(options) if options else None
+    valid_options = {opt.lower() for opt in normalized_options} if normalized_options else None
     while True:
-        suffix = f" [{default}]" if default is not None else ""
-        raw = input(f"{prompt}{suffix}: ").strip()
+        option_suffix = f" ({'/'.join(normalized_options)})" if normalized_options else ""
+        default_suffix = (
+            f" [default: {default}]" if default is not None else ""
+        )
+
+        raw = input(f"{prompt}{option_suffix}{default_suffix}: ").strip()
+        if normalized_options and raw:
+            lowered = raw.lower()
+            if lowered in valid_options:
+                return raw
+
+            # Be forgiving for common shorthand inputs and unique prefixes.
+            if valid_options == {"yes", "no"} and lowered in {"y", "n"}:
+                return "yes" if lowered == "y" else "no"
+
+            matches = [opt for opt in normalized_options if opt.lower().startswith(lowered)]
+            if len(matches) == 1:
+                return matches[0]
+
+            print(f"Please enter one of: {', '.join(normalized_options)}.")
+            continue
         if raw:
             return raw
         if default is not None:
@@ -163,7 +185,11 @@ def _prompt_yes_no(
             parts.append(f"no = {no_means}")
         display = f"{prompt} ({'; '.join(parts)})"
     while True:
-        answer = _prompt_value(display, default=default).strip().lower()
+        answer = _prompt_value(
+            display,
+            default=default,
+            options=("yes", "no"),
+        ).strip().lower()
         if answer in {"y", "yes"}:
             return True
         if answer in {"n", "no"}:
@@ -227,9 +253,11 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
             print("Choose one of the Notion targets this integration can access:")
             for idx, target in enumerate(targets, start=1):
                 print(f"{idx}) {target.label} [{target.data_source_id}]")
+            target_numbers = tuple(str(idx) for idx in range(1, len(targets) + 1))
             while not data_source_id:
                 raw_choice = _prompt_value(
-                    f"Choose a target number (1-{len(targets)})"
+                    f"Choose a target number (1-{len(targets)})",
+                    options=target_numbers,
                 )
                 try:
                     selection_index = int(raw_choice)
