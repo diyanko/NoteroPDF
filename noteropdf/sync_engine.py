@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .config import AppConfig
 from .models import CandidatePdf, SyncRow, ZoteroItem
@@ -25,6 +25,8 @@ class MatchResult:
 
 
 class SyncEngine:
+    DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
+
     def __init__(self, cfg: AppConfig):
         self.cfg = cfg
         self._logger = logging.getLogger("noteropdf.sync")
@@ -108,6 +110,11 @@ class SyncEngine:
             lines.append(
                 f"- Zotero library can be read. Found {len(sample)} parent items."
             )
+            skipped_group_items = self.zotero.count_group_parent_items()
+            lines.append(
+                "- Zotero group libraries are not synced in this release. "
+                f"Skipped group parent items: {skipped_group_items}."
+            )
         except Exception as exc:
             raise RuntimeError(f"Zotero DB read-only check failed: {exc}") from exc
         safety = self.zotero.read_only_guarantees()
@@ -119,12 +126,19 @@ class SyncEngine:
 
         self.notion.ping()
         lines.append("- Notion login works.")
+        upload_limit_bytes = self.notion.get_workspace_upload_limit_bytes()
+        if upload_limit_bytes:
+            lines.append(
+                f"- Notion workspace upload limit: {upload_limit_bytes} bytes."
+            )
 
-        ds_id = self.notion.resolve_data_source_id(
-            database_id=self.cfg.notion.database_id,
+        resolved_db_id, ds_id = self.notion.resolve_target_ids(
+            configured_database_id=self.cfg.notion.database_id,
             configured_data_source_id=self.cfg.notion.data_source_id,
         )
         self.data_source_id = ds_id
+        if resolved_db_id:
+            lines.append(f"- Notion database was resolved: {resolved_db_id}")
         lines.append(f"- Notion data source was resolved: {ds_id}")
 
         self.notion.validate_pdf_property(ds_id, self.cfg.notion.pdf_property_name)
@@ -159,9 +173,6 @@ class SyncEngine:
     def estimate_parent_item_count(self) -> int:
         return len(self.zotero.list_parent_items())
 
-    def estimate_known_page_count(self) -> int:
-        return len(self.state.list_known_page_ids())
-
     def _resolve_match(self, item: ZoteroItem) -> MatchResult:
         if self.data_source_id is None:
             raise RuntimeError("data_source_id must be set before matching")
@@ -170,7 +181,9 @@ class SyncEngine:
         stale_primary = False
         if page_id:
             page = self.notion.get_page(page_id)
-            if page is not None and not page.get("archived", False):
+            if page is not None and not page.get(
+                "in_trash", page.get("archived", False)
+            ):
                 return MatchResult(
                     status=Status.OK,
                     page_id=page_id,
@@ -263,17 +276,17 @@ class SyncEngine:
         self, item_key: str, page_id: str, pdf: CandidatePdf, *, force: bool
     ) -> tuple[bool, str, str]:
         rec = self.state.get(item_key)
+        expected_name = self.notion.normalize_attachment_filename(
+            Path(pdf.absolute_path).name
+        )
+        remote_reason = self._remote_pdf_state_reason(page_id, expected_name)
+        if remote_reason is not None:
+            digest = self._get_cached_hash(pdf.absolute_path)
+            return True, remote_reason, digest
 
         if force:
             digest = self._get_cached_hash(pdf.absolute_path)
             return True, "forced", digest
-
-        remote_files_count = self.notion.page_files_count(
-            page_id, self.cfg.notion.pdf_property_name
-        )
-        if remote_files_count == 0:
-            digest = self._get_cached_hash(pdf.absolute_path)
-            return True, "missing_remote_pdf", digest
 
         if rec is None:
             digest = self._get_cached_hash(pdf.absolute_path)
@@ -297,9 +310,21 @@ class SyncEngine:
 
         return True, "changed", digest
 
+    def _remote_pdf_state_reason(self, page_id: str, expected_name: str) -> str | None:
+        remote_files = self.notion.get_page_files(page_id, self.cfg.notion.pdf_property_name)
+        if not remote_files:
+            return "missing_remote_pdf"
+        if len(remote_files) > 1:
+            return "remote_drift_multiple_files"
+
+        actual_name = str(remote_files[0].get("name") or "").strip()
+        if actual_name != expected_name:
+            return "remote_drift_name_mismatch"
+        return None
+
     def sync(self, *, force: bool = False) -> list[SyncRow]:
-        ds_id = self.notion.resolve_data_source_id(
-            database_id=self.cfg.notion.database_id,
+        _, ds_id = self.notion.resolve_target_ids(
+            configured_database_id=self.cfg.notion.database_id,
             configured_data_source_id=self.cfg.notion.data_source_id,
         )
         self.data_source_id = ds_id
@@ -307,9 +332,7 @@ class SyncEngine:
 
         rows: list[SyncRow] = []
         items = list(self.zotero.all_items())
-        self._logger.info(
-            "Starting sync run: total_parent_items=%s force=%s", len(items), force
-        )
+        self._logger.info("Starting sync run: total_parent_items=%s force=%s", len(items), force)
 
         for idx, item in enumerate(items, start=1):
             row = self._sync_one(item, force=force)
@@ -333,16 +356,10 @@ class SyncEngine:
                     row.error_message,
                 )
 
-            if not self.cfg.sync.continue_on_error and row.final_status not in (
-                Status.OK.value,
-                Status.UNCHANGED.value,
-            ):
-                break
-
         self._logger.info("Sync run completed: processed=%s", len(rows))
         return rows
 
-    def _sync_one(self, item: ZoteroItem, *, force: bool) -> SyncRow:
+    def _sync_one(self, item: ZoteroItem, *, force: bool = False) -> SyncRow:
         pdf_status, pdf, pdf_msg = self.zotero.select_candidate_pdf(item)
         if pdf_status != Status.OK.value:
             return SyncRow(
@@ -392,7 +409,27 @@ class SyncEngine:
         if match.page_id is None:
             raise RuntimeError("Match result must have page_id")
 
-        max_supported = self.cfg.sync.max_supported_mb * 1024 * 1024
+        try:
+            workspace_limit = self.notion.get_workspace_upload_limit_bytes()
+        except NotionApiError as exc:
+            return SyncRow(
+                zotero_item_key=item.key,
+                title=item.title,
+                zotero_uri=item.zotero_uri,
+                notion_page_id=match.page_id,
+                notion_page_url=match.page_url,
+                local_pdf_path=pdf.absolute_path,
+                action_taken="error",
+                final_status=self._normalize_status_code(
+                    exc.code, Status.ATTACH_FAILED
+                ),
+                error_message=self._format_api_error(exc),
+            )
+        max_supported = (
+            workspace_limit
+            if workspace_limit is not None
+            else self.DEFAULT_MAX_UPLOAD_BYTES
+        )
         if pdf.size > max_supported:
             return SyncRow(
                 zotero_item_key=item.key,
@@ -404,23 +441,7 @@ class SyncEngine:
                 action_taken="skip",
                 final_status=Status.FILE_TOO_LARGE.value,
                 error_message=(
-                    f"File is {pdf.size} bytes, above configured max_supported_mb={self.cfg.sync.max_supported_mb}"
-                ),
-            )
-
-        max_simple_upload = self.cfg.sync.max_simple_upload_mb * 1024 * 1024
-        if pdf.size > max_simple_upload:
-            return SyncRow(
-                zotero_item_key=item.key,
-                title=item.title,
-                zotero_uri=item.zotero_uri,
-                notion_page_id=match.page_id,
-                notion_page_url=match.page_url,
-                local_pdf_path=pdf.absolute_path,
-                action_taken="skip",
-                final_status=Status.FILE_TOO_LARGE.value,
-                error_message=(
-                    f"File is {pdf.size} bytes, above configured max_simple_upload_mb={self.cfg.sync.max_simple_upload_mb}; multipart upload is not implemented in v1"
+                    f"File is {pdf.size} bytes, above the supported upload limit ({max_supported} bytes)."
                 ),
             )
 
@@ -560,114 +581,3 @@ class SyncEngine:
             error_message=None,
         )
 
-    def rebuild_page_files(self) -> list[SyncRow]:
-        clear_rows: list[SyncRow] = []
-        page_ids = self.state.list_known_page_ids()
-        for page_id in page_ids:
-            if self.cfg.sync.dry_run:
-                self._logger.info(
-                    "[DRY-RUN] would clear %s on page %s",
-                    self.cfg.notion.pdf_property_name,
-                    page_id,
-                )
-                clear_rows.append(
-                    SyncRow(
-                        zotero_item_key="",
-                        title=None,
-                        zotero_uri=None,
-                        notion_page_id=page_id,
-                        notion_page_url=None,
-                        local_pdf_path=None,
-                        action_taken="dry_run_clear_pdf_property",
-                        final_status=Status.OK.value,
-                        error_message=None,
-                    )
-                )
-                continue
-            try:
-                self.notion.clear_page_files(page_id, self.cfg.notion.pdf_property_name)
-                clear_rows.append(
-                    SyncRow(
-                        zotero_item_key="",
-                        title=None,
-                        zotero_uri=None,
-                        notion_page_id=page_id,
-                        notion_page_url=None,
-                        local_pdf_path=None,
-                        action_taken="clear_pdf_property",
-                        final_status=Status.OK.value,
-                        error_message=None,
-                    )
-                )
-            except NotionApiError as exc:
-                clear_rows.append(
-                    SyncRow(
-                        zotero_item_key="",
-                        title=None,
-                        zotero_uri=None,
-                        notion_page_id=page_id,
-                        notion_page_url=None,
-                        local_pdf_path=None,
-                        action_taken="clear_pdf_property",
-                        final_status=self._normalize_status_code(
-                            exc.code, Status.ATTACH_FAILED
-                        ),
-                        error_message=self._format_api_error(exc),
-                    )
-                )
-                self._logger.warning(
-                    "Failed to clear files on page=%s property=%s reason=%s",
-                    page_id,
-                    self.cfg.notion.pdf_property_name,
-                    exc,
-                )
-        return clear_rows + self.sync(force=True)
-
-    def full_reset(self) -> list[SyncRow]:
-        rows: list[SyncRow] = []
-        page_ids = self.state.list_known_page_ids()
-        all_clears_ok = True
-        for page_id in page_ids:
-            try:
-                if not self.cfg.sync.dry_run:
-                    self.notion.clear_page_files(
-                        page_id, self.cfg.notion.pdf_property_name
-                    )
-                rows.append(
-                    SyncRow(
-                        zotero_item_key="",
-                        title=None,
-                        zotero_uri=None,
-                        notion_page_id=page_id,
-                        notion_page_url=None,
-                        local_pdf_path=None,
-                        action_taken="clear_pdf_property",
-                        final_status=Status.OK.value,
-                        error_message=None,
-                    )
-                )
-            except NotionApiError as exc:
-                all_clears_ok = False
-                rows.append(
-                    SyncRow(
-                        zotero_item_key="",
-                        title=None,
-                        zotero_uri=None,
-                        notion_page_id=page_id,
-                        notion_page_url=None,
-                        local_pdf_path=None,
-                        action_taken="clear_pdf_property",
-                        final_status=self._normalize_status_code(
-                            exc.code, Status.ATTACH_FAILED
-                        ),
-                        error_message=self._format_api_error(exc),
-                    )
-                )
-
-        if not self.cfg.sync.dry_run and all_clears_ok:
-            self.state.clear_all()
-        elif not self.cfg.sync.dry_run and not all_clears_ok:
-            self._logger.warning(
-                "Not clearing local sync state because one or more Notion clear operations failed"
-            )
-        return rows

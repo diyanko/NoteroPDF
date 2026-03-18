@@ -123,16 +123,6 @@ class StateStore:
         )
         self._conn.commit()
 
-    def list_known_page_ids(self) -> list[str]:
-        cur = self._conn.execute(
-            "SELECT DISTINCT notion_page_id FROM sync_state WHERE notion_page_id <> ''"
-        )
-        return [row[0] for row in cur.fetchall()]
-
-    def clear_all(self) -> None:
-        self._conn.execute("DELETE FROM sync_state")
-        self._conn.commit()
-
     def close(self) -> None:
         self._conn.close()
         if self._lock_fd is not None:
