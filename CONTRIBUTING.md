@@ -84,7 +84,7 @@ Before opening a PR:
 - Keep matching behavior deterministic.
 - Avoid destructive behavior by default.
 - Keep user-facing language plain and direct.
-- Treat `setup`, `doctor`, and `sync` as the public CLI surface.
+- Treat `setup`, `doctor`, `sync`, and `cleanup` as the public CLI surface.
 - Prefer making `sync` self-heal common remote drift instead of adding more user-facing recovery commands.
 
 ### AI-assisted development policy

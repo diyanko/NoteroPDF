@@ -16,3 +16,4 @@ config.yaml
 .pytest_cache/
 .pytest-*/
 .tmp-review-config.yaml
+.opencode/

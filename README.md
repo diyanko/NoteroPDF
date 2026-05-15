@@ -69,12 +69,49 @@ python -m pip install -e ".[dev]"
 
 ## Use It
 
-1. Run `noteropdf setup`.
-2. Run `noteropdf doctor`.
-3. Run `noteropdf sync` with `dry_run: true` first.
-4. If the preview looks correct, set `dry_run: false` and run `noteropdf sync` again.
+Start with the guided setup:
+
+```bash
+noteropdf setup
+```
+
+Then check that Zotero and Notion are reachable:
+
+```bash
+noteropdf doctor
+```
+
+Run a preview sync first. Setup starts with `dry_run: true`, so this checks what would happen without changing Notion:
+
+```bash
+noteropdf sync
+```
+
+If the preview looks right, edit your saved `config.yaml`, set `dry_run: false`, and run:
+
+```bash
+noteropdf sync
+```
+
+To check for Notion rows that are safe cleanup candidates, run:
+
+```bash
+noteropdf cleanup
+```
+
+The preview can include rows whose Zotero item no longer exists and duplicate rows when Zotero still points to a different canonical Notero page for the same item.
+
+If the cleanup preview looks right, apply it. NoteroPDF will ask once before moving rows to Notion trash:
+
+```bash
+noteropdf cleanup --apply
+```
+
+For scripted runs, use `noteropdf cleanup --apply --yes` to skip that confirmation.
 
 The setup flow tries to detect your Zotero data folder, discover accessible Notion targets, and write `config.yaml` for you. If discovery cannot find a target, it asks for a Notion database URL/ID or data source URL/ID and continues.
+
+Terminal output is meant to be readable for normal users. Detailed technical logs are still written to a log file for troubleshooting. Use `--verbose` when you want those details in the terminal, or `--no-color` if your terminal should stay plain.
 
 ## What It Does
 
@@ -83,25 +120,39 @@ The setup flow tries to detect your Zotero data folder, discover accessible Noti
 - Files over Notion's upload limit are skipped with a clear error
 - Files up to 20 MB use single-part upload
 - Larger files use Notion multi-part upload when the workspace supports it
+- Cleanup is separate from sync and only trashes rows with a strong stale or duplicate classification
 - Zotero data is never modified
+
+## What Changes In Notion
+
+`sync` only updates the configured Notion files property, usually `PDF`, on rows that can be matched confidently to Zotero items.
+
+`cleanup` does not run during sync. By default it only reports cleanup candidates. With `cleanup --apply`, it moves only strongly classified stale rows and canonical duplicates from the local personal Zotero library to Notion trash. It skips rows that are ambiguous, outside the local personal library scope, or missing the configured Zotero URI field, so you can review them manually.
 
 ## Results
 
-Each sync writes local artifacts under standard OS app directories managed by `platformdirs`:
+Each run writes local artifacts under standard OS app directories managed by `platformdirs`:
 
 - run logs
 - JSON report
 - CSV report
 - summary JSON
 
+The terminal shows the short version. Reports contain the full item-by-item details.
+
 ## Troubleshooting
 
-- `NOTION_AUTH_ERROR`: verify token and database sharing
-- `NOTION_SCHEMA_ERROR`: confirm the selected database contains the configured files property
-- `NO_NOTION_MATCH`: check Notero page link, `Zotero URI`, or DOI
-- `MULTIPLE_NOTION_MATCHES`: make Notion matching data unique
-- `NO_PDF` or `MULTIPLE_PDFS`: correct Zotero attachments for the item
-- `FILE_TOO_LARGE`: PDF exceeds the current Notion workspace upload limit
+- `NOTION_AUTH_ERROR`: check that your Notion token is correct and that the database is shared with the integration.
+- `NOTION_SCHEMA_ERROR`: check that the selected database has the configured properties, especially the `PDF` files property.
+- `NO_NOTION_MATCH`: check the Notero page link, `Zotero URI`, or DOI for that item.
+- `MULTIPLE_NOTION_MATCHES`: more than one Notion row matches the same Zotero item; make the Notion data unique.
+- `NO_PDF`: add one PDF attachment to the Zotero item.
+- `MULTIPLE_PDFS`: keep only the intended PDF attachment for that Zotero item.
+- `FILE_TOO_LARGE`: the PDF is larger than Notion accepts for your workspace.
+- `AMBIGUOUS_CLEANUP_MATCH`: cleanup found duplicate Notion rows for a live Zotero item and skipped them for review.
+- `UNMANAGED_NOTION_ROW`: cleanup found a row without a usable `Zotero URI` and left it untouched.
+
+For harder cases, rerun the same command with `--verbose` and check the detailed log path shown at the top of the terminal output.
 
 ## Scope
 

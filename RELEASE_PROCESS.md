@@ -59,3 +59,7 @@ The GitHub Release page should contain:
 - standalone Windows bundle zip
 - standalone macOS bundle zip
 - standalone Linux bundle zip
+
+The tag release workflow also publishes the wheel and source tarball to PyPI
+through trusted publishing. Confirm the PyPI project page shows the new version
+after the workflow finishes.

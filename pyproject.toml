@@ -4,10 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noteropdf"
-version = "0.2.1"
+version = "0.3.0"
 description = "Deterministic local Zotero PDF to Notion files-property sync CLI"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
+license = "MIT"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Education",
+  "Intended Audience :: Science/Research",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
   "PyYAML==6.0.2",
   "python-dotenv==1.0.1",
@@ -25,6 +40,11 @@ dev = [
 
 [project.scripts]
 noteropdf = "noteropdf.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/diyanko/NoteroPDF"
+Issues = "https://github.com/diyanko/NoteroPDF/issues"
+Source = "https://github.com/diyanko/NoteroPDF"
 
 [tool.setuptools.packages.find]
 include = ["noteropdf*"]

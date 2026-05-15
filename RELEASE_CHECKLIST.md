@@ -19,15 +19,26 @@ Use this with `RELEASE_PROCESS.md`.
 
 - [ ] Run `noteropdf setup` on a real machine
 - [ ] Run `noteropdf doctor`
+- [ ] Confirm normal terminal output is readable without `--verbose`
+- [ ] Confirm `--verbose` shows technical details and the log path is useful
+- [ ] Confirm `--no-color` and `NO_COLOR=1` produce plain output
 - [ ] Run one dry-run sync
 - [ ] Run one real sync against a real Zotero + Notion setup
 - [ ] Confirm `sync` repairs a common drift case by clearing or mismatching one Notion PDF field and rerunning
+- [ ] Run `noteropdf cleanup` and review the preview report
+- [ ] Run `noteropdf cleanup --apply`, confirm the prompt, and verify only stale rows or canonical duplicates moved to Notion trash
+- [ ] If testing duplicate cleanup, verify only a row duplicated by an active canonical Notero page is moved to trash
+- [ ] Run `noteropdf cleanup --apply` again and decline the prompt to verify no Notion changes occur
 
 ## Docs and packaging
 
 - [ ] README still matches the actual CLI
+- [ ] `noteropdf --help`, `noteropdf sync --help`, and `noteropdf cleanup --help` use user-friendly wording
+- [ ] PyPI trusted publishing is configured for `diyanko/NoteroPDF` and `.github/workflows/release.yml`
+- [ ] Release workflow grants `id-token: write` and uses `pypa/gh-action-pypi-publish@release/v1` without a PyPI token
 - [ ] No secrets or machine-specific paths are committed
 - [ ] GitHub Actions release workflow produced wheel, sdist, and standalone Windows/macOS/Linux bundles
+- [ ] PyPI release page contains `noteropdf` version `X.Y.Z`
 
 ## Publish
 

@@ -19,3 +19,7 @@ notion:
 sync:
   # If true, simulate actions without writing to Notion.
   dry_run: true
+  # Optional troubleshooting overrides. Most users should leave these unset.
+  # state_db_path: "/path/to/sync-state.sqlite3"
+  # report_dir: "/path/to/reports"
+  # log_dir: "/path/to/logs"
