@@ -8,6 +8,7 @@ Use this with `RELEASE_PROCESS.md`.
 - [ ] `python -m pip install -e ".[dev]"`
 - [ ] Update the version in `pyproject.toml`
 - [ ] Update `CHANGELOG.md`
+- [ ] If Python support changed, update package metadata, CLI version guard, README, and CI matrix together
 - [ ] `python -m pytest -q`
 - [ ] `python -m build`
 - [ ] Use Python 3.12 for the bundle build

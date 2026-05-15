@@ -6,6 +6,7 @@ Use this process for every release.
 
 - bump `version` in `pyproject.toml`
 - add a short entry to `CHANGELOG.md`
+- if supported Python versions changed, update `pyproject.toml`, `noteropdf/cli.py`, `README.md`, and the CI matrix together
 
 ## 2. Verify locally
 
