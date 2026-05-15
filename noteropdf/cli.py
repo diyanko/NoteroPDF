@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import logging
 import os
 import sys
@@ -14,7 +15,7 @@ from .config import (LATEST_NOTION_VERSION, detect_zotero_data_dir,
                      store_token_in_keyring)
 from .logging_setup import setup_run_logging
 from .notion_client import NotionApiError, NotionClient
-from .reporting import write_reports
+from .reporting import write_cleanup_reports, write_reports
 from .sync_engine import SyncEngine
 from .util import normalize_notion_target_inputs, zotero_maybe_open
 
@@ -30,9 +31,23 @@ class _CleanHelpParser(argparse.ArgumentParser):
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "--verbose",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Show detailed technical progress in the terminal",
+    )
+    parent.add_argument(
+        "--no-color",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Turn off colored terminal output",
+    )
     parser = _CleanHelpParser(
         prog="noteropdf",
         description="Upload local Zotero PDFs to matching Notion rows in a safe, predictable way.",
+        parents=[parent],
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--env", default=".env", help="Path to .env file")
@@ -40,21 +55,60 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{setup,doctor,sync}",
+        metavar="{setup,doctor,sync,cleanup}",
         parser_class=_CleanHelpParser,
     )
 
-    setup_p = sub.add_parser("setup", help="Guided first-time configuration")
+    setup_p = sub.add_parser(
+        "setup",
+        help="Guided first-time configuration",
+        description="Create a NoteroPDF config with guided Zotero and Notion prompts.",
+        parents=[parent],
+    )
     setup_p.add_argument(
         "--yes",
         action="store_true",
         help="Skip overwrite prompt if config already exists",
     )
 
-    sub.add_parser("doctor", help="Check setup and access. Run this first.")
-    sync_p = sub.add_parser("sync", help="Upload only files that need updates")
+    sub.add_parser(
+        "doctor",
+        help="Check setup and access. Run this first.",
+        description="Check that Zotero, Notion, reports, logs, and local state are ready.",
+        parents=[parent],
+    )
+    sync_p = sub.add_parser(
+        "sync",
+        help="Upload only files that need updates",
+        description=(
+            "Attach Zotero PDFs to matching Notion rows. Respects "
+            "sync.dry_run in config.yaml."
+        ),
+        parents=[parent],
+    )
     sync_p.add_argument(
         "--force", action="store_true", help="Force re-upload even when unchanged"
+    )
+    cleanup_p = sub.add_parser(
+        "cleanup",
+        help="Preview or trash stale or duplicate Notion rows",
+        description=(
+            "Find Notion rows whose Zotero item no longer exists, plus duplicate "
+            "rows when a canonical Notero-linked row exists. By default this is a "
+            "preview only. Use --apply to move strongly classified rows to Notion "
+            "trash after confirmation."
+        ),
+        parents=[parent],
+    )
+    cleanup_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Move cleanup candidates to trash after confirmation",
+    )
+    cleanup_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the cleanup apply confirmation prompt",
     )
 
     return parser
@@ -75,31 +129,110 @@ def _status_help_text(status: str) -> str | None:
         "UPLOAD_FAILED": "File upload failed. Rerun sync after checking the logs; sync repairs common Notion-side drift automatically.",
         "ATTACH_FAILED": "Upload finished but attaching to page failed. Rerun sync after checking Notion access.",
         "STATE_SAVE_FAILED": "PDF was attached, but local state save failed. Next run may re-upload the file.",
+        "AMBIGUOUS_CLEANUP_MATCH": "Some Notion rows were skipped because multiple rows still point at the same live Zotero item.",
+        "UNMANAGED_NOTION_ROW": "Some Notion rows were skipped because they do not have a usable Zotero URI and cannot be classified safely.",
     }
     return guides.get(status)
 
 
-def _print_summary(rows) -> None:
+def _status_label(status: str) -> str:
+    labels = {
+        "OK": "Uploaded",
+        "UNCHANGED": "Already up to date",
+        "NO_PDF": "Skipped: no PDF",
+        "MULTIPLE_PDFS": "Skipped: multiple PDFs",
+        "BROKEN_ATTACHMENT_PATH": "Skipped: missing local file",
+        "NO_NOTION_MATCH": "Skipped: no Notion match",
+        "MULTIPLE_NOTION_MATCHES": "Skipped: multiple Notion matches",
+        "FILE_TOO_LARGE": "Skipped: file too large",
+        "STALE_NOTION_ROW": "Stale Notion row",
+        "AMBIGUOUS_CLEANUP_MATCH": "Skipped: needs review",
+        "UNMANAGED_NOTION_ROW": "Skipped: not managed by NoteroPDF",
+    }
+    return labels.get(status, status.replace("_", " ").title())
+
+
+def _action_label(action: str) -> str:
+    if action.startswith("dry_run_upload:"):
+        return f"Would upload ({_reason_label(action.split(':', 1)[1])})"
+    if action.startswith("upload_attach:"):
+        return f"Uploaded PDF ({_reason_label(action.split(':', 1)[1])})"
+    if action.startswith("dry_run_trash:"):
+        return f"Would move to Notion trash ({_reason_label(action.split(':', 1)[1])})"
+    if action.startswith("trash:"):
+        return f"Moved to Notion trash ({_reason_label(action.split(':', 1)[1])})"
+    labels = {
+        "skip": "Skipped",
+        "error": "Error",
+        "upload": "Upload failed",
+        "attach": "Attached or attach failed",
+        "quick_fingerprint_match": "Already up to date",
+        "hash_match": "Already up to date",
+        "keep:canonical_notero_page": "Kept linked Notion row",
+        "keep:live_zotero_match": "Kept live Zotero row",
+        "skip:unmanaged_missing_zotero_uri": "Skipped row missing Zotero URI",
+        "skip:out_of_scope_zotero_uri": "Skipped row outside local library scope",
+        "skip:stale_canonical_notero_page": "Skipped row with stale Notero link",
+        "skip:ambiguous_duplicate_live_match": "Skipped duplicate rows for review",
+    }
+    return labels.get(action, action.replace("_", " ").replace(":", ": ").title())
+
+
+def _reason_label(reason: str) -> str:
+    labels = {
+        "first_sync": "first sync",
+        "changed": "PDF changed",
+        "forced": "forced",
+        "missing_remote_pdf": "missing PDF in Notion",
+        "remote_drift_multiple_files": "multiple files in Notion",
+        "remote_drift_name_mismatch": "file name changed in Notion",
+        "missing_from_zotero_library": "missing from Zotero",
+        "duplicate_of_canonical_notero_page": "duplicate of linked row",
+    }
+    return labels.get(reason, reason.replace("_", " "))
+
+
+def _report_path_line(label: str, path: Path) -> str:
+    return f"- {label}: {path}"
+
+
+def _cleanup_stale_count(rows) -> int:
+    return sum(
+        1
+        for r in rows
+        if r.final_status == "STALE_NOTION_ROW"
+        and (
+            r.action_taken.startswith("dry_run_trash:")
+            or r.action_taken.startswith("trash:")
+        )
+    )
+
+
+def _print_summary(rows, *, dry_run: bool) -> None:
     logger = logging.getLogger("noteropdf.cli")
     counts = Counter(r.final_status for r in rows)
     action_counts = Counter(r.action_taken for r in rows)
 
     logger.info("What happened")
     logger.info("- Processed items: %s", len(rows))
+    if dry_run:
+        logger.info("- Mode: Preview only. Notion was not changed.")
+    else:
+        logger.info("- Mode: Live sync. Matching Notion PDF fields may have changed.")
     logger.info("- Result counts:")
     for key in sorted(counts.keys()):
-        logger.info("  - %s: %s", key, counts[key])
+        logger.info("  - %s: %s", _status_label(key), counts[key])
 
     logger.info("- Actions taken:")
     for key in sorted(action_counts.keys()):
-        logger.info("  - %s: %s", key, action_counts[key])
+        logger.info("  - %s: %s", _action_label(key), action_counts[key])
 
     failure_rows = [r for r in rows if r.final_status not in ("OK", "UNCHANGED")]
     if failure_rows:
         reason_counts = Counter()
         for r in failure_rows:
             msg = (r.error_message or "").strip() or "n/a"
-            reason_counts[f"{r.final_status} | {msg}"] += 1
+            reason_counts[f"{_status_label(r.final_status)} | {msg}"] += 1
 
         logger.info("- Top failure reasons:")
         for reason, count in reason_counts.most_common(10):
@@ -109,24 +242,118 @@ def _print_summary(rows) -> None:
         for status in sorted({r.final_status for r in failure_rows}):
             tip = _status_help_text(status)
             if tip:
-                logger.info("- %s: %s", status, tip)
+                logger.info("- %s: %s", _status_label(status), tip)
     else:
-        logger.info("What to do next")
+        logger.info("[NEXT] What to do next")
         logger.info("- Sync looks healthy. You can rerun the same command anytime.")
+
+
+def _print_cleanup_summary(rows, *, apply: bool) -> None:
+    logger = logging.getLogger("noteropdf.cli")
+    counts = Counter(r.final_status for r in rows)
+    action_counts = Counter(r.action_taken for r in rows)
+
+    logger.info("What happened")
+    logger.info("- Processed Notion rows: %s", len(rows))
+    if apply:
+        logger.info("- Mode: Apply. Stale rows were moved to Notion trash.")
+    else:
+        logger.info("- Mode: Preview only. Notion was not changed.")
+    logger.info("- Result counts:")
+    for key in sorted(counts.keys()):
+        logger.info("  - %s: %s", _status_label(key), counts[key])
+
+    logger.info("- Actions taken:")
+    for key in sorted(action_counts.keys()):
+        logger.info("  - %s: %s", _action_label(key), action_counts[key])
+
+    failure_rows = [
+        r
+        for r in rows
+        if r.final_status
+        not in (
+            "UNCHANGED",
+            "STALE_NOTION_ROW",
+            "AMBIGUOUS_CLEANUP_MATCH",
+            "UNMANAGED_NOTION_ROW",
+        )
+    ]
+    if failure_rows:
+        reason_counts = Counter()
+        for r in failure_rows:
+            msg = (r.error_message or "").strip() or "n/a"
+            reason_counts[f"{_status_label(r.final_status)} | {msg}"] += 1
+
+        logger.info("- Top failure reasons:")
+        for reason, count in reason_counts.most_common(10):
+            logger.info("  - %s (count=%s)", reason, count)
+
+    logger.info("[NEXT] What to do next")
+    stale_count = _cleanup_stale_count(rows)
+    if not apply and stale_count:
+        logger.info(
+            "- Review the cleanup report. To move these %s stale rows to "
+            "Notion trash, run `noteropdf cleanup --apply`.",
+            stale_count,
+        )
+    elif not apply:
+        logger.info("- No stale rows were found. You can rerun cleanup anytime.")
+    else:
+        logger.info(
+            "- Cleanup completed. Rerun `noteropdf cleanup` anytime to "
+            "preview additional stale rows."
+        )
+
+    for status in sorted({r.final_status for r in rows}):
+        tip = _status_help_text(status)
+        if tip:
+            logger.info("- %s: %s", _status_label(status), tip)
 
 
 def _print_write_preflight(
     command_name: str, property_name: str, candidate_count: int, dry_run: bool
 ) -> None:
     logger = logging.getLogger("noteropdf.cli")
-    logger.info("Write preflight")
+    logger.info("Before starting")
     logger.info("- Command: %s", command_name)
     logger.info("- Target Notion property: %s", property_name)
-    logger.info("- Candidate items/pages in scope: %s", candidate_count)
+    logger.info("- Zotero items to check: %s", candidate_count)
     if dry_run:
-        logger.info("- Dry run is ON. No changes will be written to Notion.")
+        logger.info("- Mode: Preview only. Notion will not be changed.")
     else:
-        logger.info("- Dry run is OFF. Matching rows may be updated in Notion.")
+        logger.info("- Mode: Live sync. Matching Notion rows may be updated.")
+
+
+def _make_sync_progress_logger():
+    logger = logging.getLogger("noteropdf.cli")
+
+    def _progress(done: int, total: int) -> None:
+        if total == 0:
+            logger.info("[OK] No Zotero items were found to check.")
+            return
+        if done == 0:
+            logger.info("[INFO] Sync progress: checking %s Zotero items.", total)
+            return
+        if done == total:
+            logger.info("[OK] Sync progress: checked all %s Zotero items.", total)
+            return
+        logger.info("[INFO] Sync progress: checked %s of %s Zotero items.", done, total)
+
+    return _progress
+
+
+def _print_cleanup_preflight(candidate_count: int, apply: bool) -> None:
+    logger = logging.getLogger("noteropdf.cli")
+    logger.info("Before starting")
+    logger.info("- Command: cleanup")
+    logger.info("- Live Zotero items in scope: %s", candidate_count)
+    if apply:
+        logger.info(
+            "- Mode: Apply requested. You will confirm before Notion rows "
+            "are moved to trash."
+        )
+    else:
+        logger.info("- Mode: Preview only. Notion will not be changed.")
 
 
 def _prompt_value(
@@ -166,6 +393,18 @@ def _prompt_value(
         if not required:
             return ""
         print("This value is required.")
+
+
+def _prompt_secret(prompt: str) -> str:
+    while True:
+        raw = getpass.getpass(f"{prompt}: ").strip()
+        if raw:
+            return raw
+        print("This value is required.")
+
+
+def _stdin_interactive() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
 
 
 def _prompt_yes_no(
@@ -227,10 +466,10 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
 
     print("\nStep 2 of 4: Notion token")
     token_env = _prompt_value(
-        "Name to save your Notion token under (environment key)",
+        "Name to save your Notion token under",
         default="NOTION_TOKEN",
     )
-    token_value = _prompt_value(
+    token_value = _prompt_secret(
         "Notion integration token (paste the full token, starts with ntn_)"
     )
 
@@ -279,6 +518,9 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
         print(f"Automatic Notion target discovery was skipped: {exc}")
 
     while not database_id and not data_source_id:
+        print(
+            "Tip: in Notion, open the database you use with Notero and copy its browser URL."
+        )
         raw_database_id = _prompt_value(
             "Notion database URL or ID", default="", required=False
         )
@@ -362,17 +604,19 @@ def _run_setup(config_path: Path, env_path: Path, force_overwrite: bool) -> int:
         print(f"Saved config: {effective_config_path}")
         print(f"Saved token in env file: {effective_env_path}")
 
-    print("Next steps:")
+    print("\nNext steps:")
     print("1) Run: noteropdf doctor")
     print("2) Run: noteropdf sync")
     if dry_run:
         print(
-            f"3) If the preview looks correct, set dry_run: false in {effective_config_path} and run sync again"
+            "3) If the preview looks correct, set dry_run: false in "
+            f"{effective_config_path} and run sync again"
         )
     else:
         print(
             "3) You are live now (dry_run is off). Re-run sync anytime to apply new changes."
         )
+    print("4) Run: noteropdf cleanup to preview stale Notion rows before deleting anything")
     return 0
 
 
@@ -406,6 +650,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser = _build_parser()
     args = parser.parse_args(raw_argv)
+    verbose = bool(getattr(args, "verbose", False))
+    no_color = bool(getattr(args, "no_color", False))
 
     if args.command == "setup":
         config_path = Path(args.config)
@@ -430,49 +676,140 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
     except (FileNotFoundError, ValueError, KeyError) as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
+        print(f"[ERROR] Configuration problem: {exc}", file=sys.stderr)
         return 2
     logger = logging.getLogger("noteropdf.cli")
 
-    log_path = setup_run_logging(cfg.sync.log_dir, args.command, cfg.sync.log_level)
-    logger.info("Run log: %s", log_path)
+    try:
+        log_path = setup_run_logging(
+            cfg.sync.log_dir,
+            args.command,
+            cfg.sync.log_level,
+            no_color,
+            verbose,
+        )
+    except OSError as exc:
+        print(
+            "[ERROR] Could not create the run log folder: "
+            f"{cfg.sync.log_dir} ({exc}). "
+            "Set sync.log_dir in config.yaml to a folder you can write to.",
+            file=sys.stderr,
+        )
+        return 1
+
+    logger.info("[INFO] Detailed log: %s", log_path)
     started = perf_counter()
 
-    if zotero_maybe_open() and args.command == "sync":
+    if zotero_maybe_open() and args.command in {"sync", "cleanup"}:
         logger.warning(
-            "Zotero appears to be running. Read-only mode is used, but close Zotero for best consistency."
+            "Zotero appears to be running. Read-only mode is used, but close "
+            "Zotero for best consistency."
         )
 
-    engine = SyncEngine(cfg)
+    engine = None
     try:
-        try:
-            if args.command == "doctor":
-                lines = engine.doctor()
-                for line in lines:
-                    logger.info(line)
-                return 0
+        open_state = args.command == "sync"
+        acquire_lock = args.command == "sync" or (
+            args.command == "cleanup" and bool(getattr(args, "apply", False))
+        )
+        engine = SyncEngine(cfg, open_state=open_state, acquire_lock=acquire_lock)
 
-            if args.command == "sync":
-                parent_count = engine.estimate_parent_item_count()
-                _print_write_preflight(
-                    "sync", cfg.notion.pdf_property_name, parent_count, cfg.sync.dry_run
-                )
-                rows = engine.sync(force=bool(args.force))
-                json_path, csv_path, summary_path = write_reports(
-                    cfg.sync.report_dir, "sync-force" if args.force else "sync", rows
-                )
-                _print_summary(rows)
-                logger.info("JSON report: %s", json_path)
-                logger.info("CSV report: %s", csv_path)
-                logger.info("Summary report: %s", summary_path)
-                logger.info("Elapsed seconds: %.2f", perf_counter() - started)
-                return 0
+        if args.command == "doctor":
+            lines = engine.doctor()
+            for line in lines:
+                logger.info(line)
+            logger.info("[OK] Setup check finished.")
+            return 0
 
-            logger.error("Unknown command: %s", args.command)
-            return 2
-        except Exception as exc:
-            logger.exception("Command failed: %s", exc)
+        if args.command == "sync":
+            parent_count = engine.estimate_parent_item_count()
+            _print_write_preflight(
+                "sync", cfg.notion.pdf_property_name, parent_count, cfg.sync.dry_run
+            )
+            rows = engine.sync(
+                force=bool(args.force),
+                progress_callback=_make_sync_progress_logger(),
+            )
+            json_path, csv_path, summary_path = write_reports(
+                cfg.sync.report_dir, "sync-force" if args.force else "sync", rows
+            )
+            _print_summary(rows, dry_run=cfg.sync.dry_run)
+            logger.info("Reports")
+            logger.info(_report_path_line("JSON report", json_path))
+            logger.info(_report_path_line("CSV report", csv_path))
+            logger.info(_report_path_line("Summary report", summary_path))
             logger.info("Elapsed seconds: %.2f", perf_counter() - started)
-            return 1
+            return 0
+
+        if args.command == "cleanup":
+            parent_count = engine.estimate_parent_item_count()
+            _print_cleanup_preflight(parent_count, bool(args.apply))
+            if args.apply and not args.yes:
+                preview_rows = engine.cleanup_deleted_pages(apply=False)
+                json_path, csv_path, summary_path = write_cleanup_reports(
+                    cfg.sync.report_dir,
+                    "cleanup",
+                    preview_rows,
+                )
+                _print_cleanup_summary(preview_rows, apply=False)
+                logger.info("Reports")
+                logger.info(_report_path_line("JSON report", json_path))
+                logger.info(_report_path_line("CSV report", csv_path))
+                logger.info(_report_path_line("Summary report", summary_path))
+
+                stale_count = _cleanup_stale_count(preview_rows)
+                if stale_count == 0:
+                    logger.info("[OK] No stale rows to move to trash.")
+                    logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+                    return 0
+                if not _stdin_interactive():
+                    logger.error(
+                        "Cleanup apply needs confirmation. Run this command in an "
+                        "interactive terminal, or use `noteropdf cleanup --apply --yes` "
+                        "after reviewing the preview report."
+                    )
+                    logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+                    return 2
+                confirmed = _prompt_yes_no(
+                    f"Move {stale_count} stale Notion rows to trash now?",
+                    default_yes=False,
+                )
+                if not confirmed:
+                    logger.info("[OK] Cleanup apply cancelled. Notion was not changed.")
+                    logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+                    return 0
+
+            rows = engine.cleanup_deleted_pages(apply=bool(args.apply))
+            json_path, csv_path, summary_path = write_cleanup_reports(
+                cfg.sync.report_dir,
+                "cleanup-apply" if args.apply else "cleanup",
+                rows,
+            )
+            _print_cleanup_summary(rows, apply=bool(args.apply))
+            logger.info("Reports")
+            logger.info(_report_path_line("JSON report", json_path))
+            logger.info(_report_path_line("CSV report", csv_path))
+            logger.info(_report_path_line("Summary report", summary_path))
+            logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+            return 0
+
+        logger.error("Unknown command: %s", args.command)
+        return 2
+    except OSError as exc:
+        logger.error(
+            "%s. Check that the configured state, report, and log folders are writable.",
+            exc,
+        )
+        logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+        return 1
+    except Exception as exc:
+        if verbose:
+            logger.exception("Command failed: %s", exc)
+        else:
+            logger.error("Command failed: %s", exc)
+            logger.info("- Run again with `--verbose` for technical details.")
+        logger.info("Elapsed seconds: %.2f", perf_counter() - started)
+        return 1
     finally:
-        engine.close()
+        if engine is not None:
+            engine.close()

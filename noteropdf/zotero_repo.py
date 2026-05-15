@@ -85,12 +85,14 @@ class ZoteroRepository:
             )
             SELECT items.itemID, items.key, items.libraryID, f_title.title, f_doi.doi
             FROM items
+            JOIN itemTypes ON itemTypes.itemTypeID = items.itemTypeID
             LEFT JOIN f_title ON f_title.itemID = items.itemID
             LEFT JOIN f_doi ON f_doi.itemID = items.itemID
             LEFT JOIN itemAttachments child ON child.itemID = items.itemID
             LEFT JOIN deletedItems di ON di.itemID = items.itemID
             WHERE child.itemID IS NULL
               AND di.itemID IS NULL
+              AND itemTypes.typeName NOT IN ('note', 'annotation')
             ORDER BY items.itemID ASC
             """
         )
@@ -106,7 +108,7 @@ class ZoteroRepository:
 
             zotero_web_uri = None
             if username:
-                zotero_web_uri = f"https://zotero.org/{username}/items/{key}"
+                zotero_web_uri = f"https://zotero.org/{username.lower()}/items/{key}"
 
             notero_url = self.find_notero_page_link_for_parent(int(row["itemID"]))
             out.append(

@@ -305,6 +305,75 @@ def test_list_accessible_data_sources_returns_sorted_targets(monkeypatch):
     assert targets[0].database_id == "db-a"
 
 
+def test_list_data_source_pages_paginates_and_skips_trashed(monkeypatch):
+    client = NotionClient(token="x", notion_version="2026-03-11")
+    payloads = [
+        {
+            "results": [
+                {"object": "page", "id": "page-1", "url": "https://notion.so/page-1"},
+                {"object": "page", "id": "page-2", "url": "https://notion.so/page-2", "in_trash": True},
+            ],
+            "has_more": True,
+            "next_cursor": "cursor-1",
+        },
+        {
+            "results": [
+                {"object": "data_source", "id": "ds-ignored"},
+                {"object": "page", "id": "page-3", "url": "https://notion.so/page-3"},
+            ],
+            "has_more": False,
+            "next_cursor": None,
+        },
+    ]
+    calls = []
+
+    def fake_request(method, path, *, json_body=None, **kwargs):
+        calls.append((method, path, json_body))
+        return payloads.pop(0)
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    pages = client.list_data_source_pages("ds-1")
+
+    assert [page["id"] for page in pages] == ["page-1", "page-3"]
+    assert calls[0][2]["page_size"] == 100
+    assert calls[1][2]["start_cursor"] == "cursor-1"
+
+
+def test_property_plain_text_supports_url_rich_text_and_title():
+    assert (
+        NotionClient.property_plain_text({"type": "url", "url": "https://zotero.org/u/items/A"})
+        == "https://zotero.org/u/items/A"
+    )
+    assert (
+        NotionClient.property_plain_text(
+            {"type": "rich_text", "rich_text": [{"plain_text": "zotero://select/library/items/A"}]}
+        )
+        == "zotero://select/library/items/A"
+    )
+    assert (
+        NotionClient.property_plain_text(
+            {"type": "title", "title": [{"plain_text": "Paper"}]}
+        )
+        == "Paper"
+    )
+
+
+def test_trash_page_uses_in_trash_patch(monkeypatch):
+    client = NotionClient(token="x", notion_version="2026-03-11")
+    calls = []
+
+    def fake_request(method, path, *, json_body=None, **kwargs):
+        calls.append((method, path, json_body))
+        return {}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    client.trash_page("page-1")
+
+    assert calls == [("PATCH", "/pages/page-1", {"in_trash": True})]
+
+
 def test_create_file_upload_uses_single_part_mode(monkeypatch):
     client = NotionClient(token="x", notion_version="2026-03-11")
     calls = []

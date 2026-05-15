@@ -241,6 +241,26 @@ class NotionClient:
             return "".join(parts).strip()
         return ""
 
+    @classmethod
+    def property_plain_text(cls, value: Any) -> str | None:
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        if not isinstance(value, dict):
+            return None
+
+        ptype = str(value.get("type") or "").strip()
+        if ptype == "url":
+            raw = str(value.get("url") or "").strip()
+            return raw or None
+        if ptype == "rich_text":
+            raw = cls._title_text(value.get("rich_text"))
+            return raw or None
+        if ptype == "title":
+            raw = cls._title_text(value.get("title"))
+            return raw or None
+        return None
+
     def list_accessible_data_sources(self) -> list[NotionTarget]:
         cursor: str | None = None
         targets: dict[str, NotionTarget] = {}
@@ -354,6 +374,45 @@ class NotionClient:
         if payload.get("_not_found"):
             return None
         return payload
+
+    def list_data_source_pages(
+        self, data_source_id: str, *, include_trashed: bool = False
+    ) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            body: dict[str, Any] = {"page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            payload = self._request(
+                "POST", f"/data_sources/{data_source_id}/query", json_body=body
+            )
+            for row in payload.get("results") or []:
+                if row.get("object") != "page":
+                    continue
+                if not include_trashed and row.get("in_trash", False):
+                    continue
+                pages.append(row)
+            if not payload.get("has_more"):
+                return pages
+            cursor = str(payload.get("next_cursor") or "").strip() or None
+            if cursor is None:
+                return pages
+
+    def get_page_property_text(
+        self, page: dict[str, Any], property_name: str
+    ) -> str | None:
+        props = page.get("properties") or {}
+        prop = props.get(property_name)
+        return self.property_plain_text(prop)
+
+    def get_page_title_text(self, page: dict[str, Any]) -> str | None:
+        props = page.get("properties") or {}
+        for prop in props.values():
+            title = self.property_plain_text(prop)
+            if isinstance(prop, dict) and prop.get("type") == "title" and title:
+                return title
+        return None
 
     def query_by_property_equals(
         self,
@@ -616,3 +675,6 @@ class NotionClient:
             }
         }
         self._request("PATCH", f"/pages/{page_id}", json_body=body)
+
+    def trash_page(self, page_id: str) -> None:
+        self._request("PATCH", f"/pages/{page_id}", json_body={"in_trash": True})

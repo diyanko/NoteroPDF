@@ -20,26 +20,19 @@ class StateRecord:
     last_error_code: Optional[str]
 
 
-class StateStore:
-    def __init__(self, db_path: Path):
-        self._db_path = db_path
-        self._lock_path = Path(f"{db_path}.lock")
+class FileLock:
+    def __init__(self, lock_path: Path):
+        self._lock_path = lock_path
         self._lock_fd: int | None = None
         self._acquire_lock()
-        try:
-            self._conn = sqlite3.connect(str(db_path))
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA synchronous=NORMAL;")
-            self._init_schema()
-        except Exception:
-            if self._lock_fd is not None:
-                os.close(self._lock_fd)
-                self._lock_fd = None
-            try:
-                self._lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
+
+    @classmethod
+    def for_state_db(cls, db_path: Path) -> "FileLock":
+        return cls(Path(f"{db_path}.lock"))
+
+    @property
+    def path(self) -> Path:
+        return self._lock_path
 
     def _acquire_lock(self) -> None:
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,9 +46,35 @@ class StateStore:
             os.write(self._lock_fd, str(os.getpid()).encode("ascii", errors="ignore"))
         except FileExistsError as exc:
             raise RuntimeError(
-                f"Sync state lock exists: {self._lock_path}. "
-                "Another run may already be active. If not, remove this lock file and retry."
+                f"Another NoteroPDF run may already be active: {self._lock_path}. "
+                "If no other run is active, remove this .lock file and try again."
             ) from exc
+
+    def close(self) -> None:
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)
+            self._lock_fd = None
+        try:
+            self._lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+class StateStore:
+    def __init__(self, db_path: Path, *, acquire_lock: bool = True):
+        self._db_path = db_path
+        self._lock = FileLock.for_state_db(db_path) if acquire_lock else None
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(db_path))
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
+            self._init_schema()
+        except Exception:
+            if self._lock is not None:
+                self._lock.close()
+                self._lock = None
+            raise
 
     def _init_schema(self) -> None:
         self._conn.execute(
@@ -125,10 +144,6 @@ class StateStore:
 
     def close(self) -> None:
         self._conn.close()
-        if self._lock_fd is not None:
-            os.close(self._lock_fd)
-            self._lock_fd = None
-        try:
-            self._lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None

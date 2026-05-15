@@ -10,11 +10,18 @@ from typing import Any
 
 import yaml
 from dotenv import load_dotenv
-from platformdirs import (user_cache_path, user_config_path, user_data_path,
-                           user_log_path)
+from platformdirs import (
+    user_cache_path,
+    user_config_path,
+    user_data_path,
+    user_log_path,
+)
 
-from .util import (normalize_notion_id_input, normalize_notion_target_inputs,
-                   unescape_js_string_literal)
+from .util import (
+    normalize_notion_id_input,
+    normalize_notion_target_inputs,
+    unescape_js_string_literal,
+)
 
 LATEST_NOTION_VERSION = "2026-03-11"
 ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
@@ -66,23 +73,23 @@ def _normalize_windows_uuidish(value: str) -> str:
 
 def get_default_config_path() -> Path:
     return (
-        user_config_path(APP_NAME, appauthor=False, ensure_exists=True) / "config.yaml"
+        user_config_path(APP_NAME, appauthor=False, ensure_exists=False) / "config.yaml"
     )
 
 
 def get_default_env_path() -> Path:
-    return user_config_path(APP_NAME, appauthor=False, ensure_exists=True) / ".env"
+    return user_config_path(APP_NAME, appauthor=False, ensure_exists=False) / ".env"
 
 
 def get_default_sync_paths() -> tuple[Path, Path, Path]:
     state_db = (
-        user_data_path(APP_NAME, appauthor=False, ensure_exists=True)
+        user_data_path(APP_NAME, appauthor=False, ensure_exists=False)
         / "sync-state.sqlite3"
     )
     report_dir = (
-        user_cache_path(APP_NAME, appauthor=False, ensure_exists=True) / "reports"
+        user_cache_path(APP_NAME, appauthor=False, ensure_exists=False) / "reports"
     )
-    log_dir = user_log_path(APP_NAME, appauthor=False, ensure_exists=True) / "runs"
+    log_dir = user_log_path(APP_NAME, appauthor=False, ensure_exists=False) / "runs"
     return state_db, report_dir, log_dir
 
 

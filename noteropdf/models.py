@@ -44,3 +44,16 @@ class SyncRow:
     action_taken: str
     final_status: str
     error_message: Optional[str]
+
+
+@dataclass
+class CleanupRow:
+    notion_page_id: str
+    notion_page_url: Optional[str]
+    title: Optional[str]
+    zotero_uri: Optional[str]
+    action_taken: str
+    final_status: str
+    error_message: Optional[str]
+    created_time: Optional[str] = None
+    last_edited_time: Optional[str] = None

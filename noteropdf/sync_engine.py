@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import urllib.parse
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Callable, Optional
 
 from .config import AppConfig
-from .models import CandidatePdf, SyncRow, ZoteroItem
+from .models import CandidatePdf, CleanupRow, SyncRow, ZoteroItem
 from .notion_client import NotionApiError, NotionClient
-from .state_store import StateRecord, StateStore
+from .state_store import FileLock, StateRecord, StateStore
 from .status import Status
 from .util import sha256_file
 from .zotero_repo import ZoteroRepository
@@ -24,15 +26,32 @@ class MatchResult:
     message: Optional[str]
 
 
+@dataclass(frozen=True)
+class CleanupCandidate:
+    page_id: str
+    page_url: str | None
+    title: str | None
+    zotero_uri: str | None
+    created_time: str | None
+    last_edited_time: str | None
+
+
 class SyncEngine:
     DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
 
-    def __init__(self, cfg: AppConfig):
+    def __init__(
+        self,
+        cfg: AppConfig,
+        *,
+        open_state: bool = True,
+        acquire_lock: bool = True,
+    ):
         self.cfg = cfg
         self._logger = logging.getLogger("noteropdf.sync")
         self.zotero: ZoteroRepository | None = None
         self.notion: NotionClient | None = None
         self.state: StateStore | None = None
+        self._run_lock: FileLock | None = None
         self._hash_cache: dict[str, str] = {}  # Cache for file hashes
         try:
             self.zotero = ZoteroRepository(
@@ -43,9 +62,18 @@ class SyncEngine:
             self.notion = NotionClient(
                 token=cfg.notion_token, notion_version=cfg.notion.notion_version
             )
-            self.state = StateStore(cfg.sync.state_db_path)
+            if open_state:
+                self.state = StateStore(
+                    cfg.sync.state_db_path,
+                    acquire_lock=acquire_lock,
+                )
+            elif acquire_lock:
+                self._run_lock = FileLock.for_state_db(cfg.sync.state_db_path)
         except Exception:
             # Ensure partially initialized resources are always released.
+            if self._run_lock is not None:
+                self._run_lock.close()
+                self._run_lock = None
             if self.state is not None:
                 self.state.close()
                 self.state = None
@@ -65,6 +93,8 @@ class SyncEngine:
             self.notion.close()
         if self.state is not None:
             self.state.close()
+        if self._run_lock is not None:
+            self._run_lock.close()
 
     @staticmethod
     def _normalize_status_code(code: str | None, fallback: Status) -> str:
@@ -80,6 +110,41 @@ class SyncEngine:
         if exc.hint:
             return f"{base} Next step: {exc.hint}"
         return base
+
+    @staticmethod
+    def _cleanup_uri_key(value: str | None) -> str:
+        return (value or "").strip().lower()
+
+    @staticmethod
+    def _cleanup_page_id_key(value: str | None) -> str:
+        return (value or "").strip().lower()
+
+    @staticmethod
+    def _cleanup_web_uri_user(value: str | None) -> str | None:
+        raw = (value or "").strip()
+        if not raw:
+            return None
+        parsed = urllib.parse.urlparse(raw)
+        hostname = (parsed.hostname or "").lower()
+        if hostname not in {"zotero.org", "www.zotero.org"}:
+            return None
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) >= 3 and parts[1].lower() == "items":
+            return parts[0].lower()
+        return None
+
+    @classmethod
+    def _cleanup_uri_in_local_scope(
+        cls, value: str | None, *, local_web_users: set[str]
+    ) -> bool:
+        uri = cls._cleanup_uri_key(value)
+        if uri.startswith("zotero://select/library/items/"):
+            return True
+        if uri.startswith("zotero://select/groups/"):
+            return False
+
+        web_user = cls._cleanup_web_uri_user(value)
+        return web_user is not None and web_user in local_web_users
 
     def _validate_zotero_paths(self) -> list[str]:
         """Validate Zotero paths and return status messages."""
@@ -172,6 +237,14 @@ class SyncEngine:
 
     def estimate_parent_item_count(self) -> int:
         return len(self.zotero.list_parent_items())
+
+    def _resolve_data_source(self) -> str:
+        _, ds_id = self.notion.resolve_target_ids(
+            configured_database_id=self.cfg.notion.database_id,
+            configured_data_source_id=self.cfg.notion.data_source_id,
+        )
+        self.data_source_id = ds_id
+        return ds_id
 
     def _resolve_match(self, item: ZoteroItem) -> MatchResult:
         if self.data_source_id is None:
@@ -275,6 +348,8 @@ class SyncEngine:
     def _needs_upload(
         self, item_key: str, page_id: str, pdf: CandidatePdf, *, force: bool
     ) -> tuple[bool, str, str]:
+        if self.state is None:
+            raise RuntimeError("Sync state is required before checking uploads")
         rec = self.state.get(item_key)
         expected_name = self.notion.normalize_attachment_filename(
             Path(pdf.absolute_path).name
@@ -322,25 +397,36 @@ class SyncEngine:
             return "remote_drift_name_mismatch"
         return None
 
-    def sync(self, *, force: bool = False) -> list[SyncRow]:
-        _, ds_id = self.notion.resolve_target_ids(
-            configured_database_id=self.cfg.notion.database_id,
-            configured_data_source_id=self.cfg.notion.data_source_id,
-        )
-        self.data_source_id = ds_id
+    def sync(
+        self,
+        *,
+        force: bool = False,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[SyncRow]:
+        ds_id = self._resolve_data_source()
         self.notion.validate_pdf_property(ds_id, self.cfg.notion.pdf_property_name)
 
         rows: list[SyncRow] = []
         items = list(self.zotero.all_items())
-        self._logger.info("Starting sync run: total_parent_items=%s force=%s", len(items), force)
+        total = len(items)
+        self._logger.debug(
+            "Starting sync run: total_parent_items=%s force=%s", total, force
+        )
+        if progress_callback is not None:
+            progress_callback(0, total)
+        progress_interval = max(1, (total + 9) // 10) if total else 1
 
         for idx, item in enumerate(items, start=1):
             row = self._sync_one(item, force=force)
             rows.append(row)
-            self._logger.info(
+            if progress_callback is not None and (
+                idx == total or idx % progress_interval == 0
+            ):
+                progress_callback(idx, total)
+            self._logger.debug(
                 "item=%s/%s status=%s action=%s key=%s page=%s title=%s",
                 idx,
-                len(items),
+                total,
                 row.final_status,
                 row.action_taken,
                 item.key,
@@ -356,8 +442,273 @@ class SyncEngine:
                     row.error_message,
                 )
 
-        self._logger.info("Sync run completed: processed=%s", len(rows))
+        self._logger.debug("Sync run completed: processed=%s", len(rows))
         return rows
+
+    def cleanup_deleted_pages(self, *, apply: bool = False) -> list[CleanupRow]:
+        ds_id = self._resolve_data_source()
+        if not self.notion.has_property(ds_id, self.cfg.notion.zotero_uri_property_name):
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Missing required Notion property: {self.cfg.notion.zotero_uri_property_name}",
+                hint=(
+                    "Cleanup requires the configured Zotero URI property to "
+                    "exist on the target data source."
+                ),
+            )
+
+        live_items = list(self.zotero.all_items())
+        live_item_key_by_uri: dict[str, str] = {}
+        canonical_page_id_by_item_key: dict[str, str] = {}
+        canonical_item_key_by_page_id: dict[str, str] = {}
+        local_web_users: set[str] = set()
+        for item in live_items:
+            live_item_key_by_uri[self._cleanup_uri_key(item.zotero_uri)] = item.key
+            if item.zotero_web_uri:
+                live_item_key_by_uri[self._cleanup_uri_key(item.zotero_web_uri)] = item.key
+                web_user = self._cleanup_web_uri_user(item.zotero_web_uri)
+                if web_user:
+                    local_web_users.add(web_user)
+            page_id = self.zotero.extract_notero_page_id(item)
+            if page_id:
+                page_key = self._cleanup_page_id_key(page_id)
+                canonical_page_id_by_item_key[item.key] = page_key
+                canonical_item_key_by_page_id[page_key] = item.key
+
+        raw_pages = self.notion.list_data_source_pages(ds_id)
+        candidates: list[CleanupCandidate] = []
+        active_page_ids: set[str] = set()
+        rows_by_live_item_key: dict[str, list[CleanupCandidate]] = defaultdict(list)
+        for page in raw_pages:
+            if page.get("in_trash", False):
+                continue
+            page_id = str(page.get("id") or "").strip()
+            if not page_id:
+                continue
+            active_page_ids.add(self._cleanup_page_id_key(page_id))
+            candidate = CleanupCandidate(
+                page_id=page_id,
+                page_url=str(page.get("url") or "").strip() or None,
+                title=self.notion.get_page_title_text(page),
+                zotero_uri=self.notion.get_page_property_text(
+                    page, self.cfg.notion.zotero_uri_property_name
+                ),
+                created_time=str(page.get("created_time") or "").strip() or None,
+                last_edited_time=str(page.get("last_edited_time") or "").strip() or None,
+            )
+            candidates.append(candidate)
+            if candidate.zotero_uri:
+                live_item_key = live_item_key_by_uri.get(
+                    self._cleanup_uri_key(candidate.zotero_uri)
+                )
+                if live_item_key:
+                    rows_by_live_item_key[live_item_key].append(candidate)
+
+        rows: list[CleanupRow] = []
+        self._logger.debug(
+            "Starting cleanup run: total_live_items=%s total_notion_pages=%s apply=%s",
+            len(live_items),
+            len(candidates),
+            apply,
+        )
+
+        for idx, candidate in enumerate(candidates, start=1):
+            row = self._cleanup_one(
+                candidate,
+                live_item_key_by_uri=live_item_key_by_uri,
+                canonical_page_id_by_item_key=canonical_page_id_by_item_key,
+                canonical_item_key_by_page_id=canonical_item_key_by_page_id,
+                rows_by_live_item_key=rows_by_live_item_key,
+                active_page_ids=active_page_ids,
+                local_web_users=local_web_users,
+                apply=apply,
+            )
+            rows.append(row)
+            self._logger.debug(
+                "cleanup=%s/%s status=%s action=%s page=%s title=%s",
+                idx,
+                len(candidates),
+                row.final_status,
+                row.action_taken,
+                row.notion_page_id,
+                row.title or "",
+            )
+            if row.error_message:
+                self._logger.warning(
+                    "cleanup=%s page=%s status=%s reason=%s",
+                    idx,
+                    row.notion_page_id,
+                    row.final_status,
+                    row.error_message,
+                )
+
+        self._logger.debug("Cleanup run completed: processed=%s", len(rows))
+        return rows
+
+    def _cleanup_one(
+        self,
+        candidate: CleanupCandidate,
+        *,
+        live_item_key_by_uri: dict[str, str],
+        canonical_page_id_by_item_key: dict[str, str],
+        canonical_item_key_by_page_id: dict[str, str],
+        rows_by_live_item_key: dict[str, list[CleanupCandidate]],
+        active_page_ids: set[str],
+        local_web_users: set[str],
+        apply: bool,
+    ) -> CleanupRow:
+        candidate_page_key = self._cleanup_page_id_key(candidate.page_id)
+        if candidate_page_key in canonical_item_key_by_page_id:
+            return CleanupRow(
+                notion_page_id=candidate.page_id,
+                notion_page_url=candidate.page_url,
+                title=candidate.title,
+                zotero_uri=candidate.zotero_uri,
+                action_taken="keep:canonical_notero_page",
+                final_status=Status.UNCHANGED.value,
+                error_message=None,
+                created_time=candidate.created_time,
+                last_edited_time=candidate.last_edited_time,
+            )
+
+        if not candidate.zotero_uri:
+            return CleanupRow(
+                notion_page_id=candidate.page_id,
+                notion_page_url=candidate.page_url,
+                title=candidate.title,
+                zotero_uri=None,
+                action_taken="skip:unmanaged_missing_zotero_uri",
+                final_status=Status.UNMANAGED_NOTION_ROW.value,
+                error_message=(
+                    "Row has no usable Zotero URI and is not the canonical "
+                    "Notero-linked page for a live Zotero item."
+                ),
+                created_time=candidate.created_time,
+                last_edited_time=candidate.last_edited_time,
+            )
+
+        live_item_key = live_item_key_by_uri.get(
+            self._cleanup_uri_key(candidate.zotero_uri)
+        )
+        if live_item_key is None:
+            if not self._cleanup_uri_in_local_scope(
+                candidate.zotero_uri, local_web_users=local_web_users
+            ):
+                return CleanupRow(
+                    notion_page_id=candidate.page_id,
+                    notion_page_url=candidate.page_url,
+                    title=candidate.title,
+                    zotero_uri=candidate.zotero_uri,
+                    action_taken="skip:out_of_scope_zotero_uri",
+                    final_status=Status.UNMANAGED_NOTION_ROW.value,
+                    error_message=(
+                        "Row has a Zotero URI outside the local personal library "
+                        "scope that cleanup can classify safely."
+                    ),
+                    created_time=candidate.created_time,
+                    last_edited_time=candidate.last_edited_time,
+                )
+            return self._trash_cleanup_candidate(
+                candidate,
+                reason="missing_from_zotero_library",
+                apply=apply,
+            )
+
+        canonical_page_id = canonical_page_id_by_item_key.get(live_item_key)
+        if canonical_page_id and canonical_page_id != candidate_page_key:
+            if canonical_page_id not in active_page_ids:
+                return CleanupRow(
+                    notion_page_id=candidate.page_id,
+                    notion_page_url=candidate.page_url,
+                    title=candidate.title,
+                    zotero_uri=candidate.zotero_uri,
+                    action_taken="skip:stale_canonical_notero_page",
+                    final_status=Status.AMBIGUOUS_CLEANUP_MATCH.value,
+                    error_message=(
+                        "Zotero's Notero page link points to a page that is not "
+                        "active in the target data source, so cleanup cannot "
+                        "choose a duplicate row safely."
+                    ),
+                    created_time=candidate.created_time,
+                    last_edited_time=candidate.last_edited_time,
+                )
+            return self._trash_cleanup_candidate(
+                candidate,
+                reason="duplicate_of_canonical_notero_page",
+                apply=apply,
+            )
+
+        competing_rows = rows_by_live_item_key.get(live_item_key, [])
+        if len(competing_rows) > 1:
+            return CleanupRow(
+                notion_page_id=candidate.page_id,
+                notion_page_url=candidate.page_url,
+                title=candidate.title,
+                zotero_uri=candidate.zotero_uri,
+                action_taken="skip:ambiguous_duplicate_live_match",
+                final_status=Status.AMBIGUOUS_CLEANUP_MATCH.value,
+                error_message=(
+                    "Multiple Notion rows match the same live Zotero item and "
+                    "no canonical Notero-linked page resolves the conflict."
+                ),
+                created_time=candidate.created_time,
+                last_edited_time=candidate.last_edited_time,
+            )
+
+        return CleanupRow(
+            notion_page_id=candidate.page_id,
+            notion_page_url=candidate.page_url,
+            title=candidate.title,
+            zotero_uri=candidate.zotero_uri,
+            action_taken="keep:live_zotero_match",
+            final_status=Status.UNCHANGED.value,
+            error_message=None,
+            created_time=candidate.created_time,
+            last_edited_time=candidate.last_edited_time,
+        )
+
+    def _trash_cleanup_candidate(
+        self, candidate: CleanupCandidate, *, reason: str, apply: bool
+    ) -> CleanupRow:
+        if not apply:
+            return CleanupRow(
+                notion_page_id=candidate.page_id,
+                notion_page_url=candidate.page_url,
+                title=candidate.title,
+                zotero_uri=candidate.zotero_uri,
+                action_taken=f"dry_run_trash:{reason}",
+                final_status=Status.STALE_NOTION_ROW.value,
+                error_message=None,
+                created_time=candidate.created_time,
+                last_edited_time=candidate.last_edited_time,
+            )
+
+        try:
+            self.notion.trash_page(candidate.page_id)
+        except NotionApiError as exc:
+            return CleanupRow(
+                notion_page_id=candidate.page_id,
+                notion_page_url=candidate.page_url,
+                title=candidate.title,
+                zotero_uri=candidate.zotero_uri,
+                action_taken=f"trash:{reason}",
+                final_status=self._normalize_status_code(exc.code, Status.ATTACH_FAILED),
+                error_message=self._format_api_error(exc),
+                created_time=candidate.created_time,
+                last_edited_time=candidate.last_edited_time,
+            )
+
+        return CleanupRow(
+            notion_page_id=candidate.page_id,
+            notion_page_url=candidate.page_url,
+            title=candidate.title,
+            zotero_uri=candidate.zotero_uri,
+            action_taken=f"trash:{reason}",
+            final_status=Status.STALE_NOTION_ROW.value,
+            error_message=None,
+            created_time=candidate.created_time,
+            last_edited_time=candidate.last_edited_time,
+        )
 
     def _sync_one(self, item: ZoteroItem, *, force: bool = False) -> SyncRow:
         pdf_status, pdf, pdf_msg = self.zotero.select_candidate_pdf(item)
@@ -580,4 +931,3 @@ class SyncEngine:
             final_status=Status.OK.value,
             error_message=None,
         )
-
