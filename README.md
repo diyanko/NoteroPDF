@@ -33,9 +33,18 @@ xattr -dr com.apple.quarantine /path/to/noteropdf
 
 If the macOS bundle still fails after that, use the source install below.
 
+### PyPI Install
+
+Use this path if you already have Python 3.11, 3.12, or 3.13 installed.
+
+```bash
+python -m pip install noteropdf
+noteropdf setup
+```
+
 ### Source Install
 
-Use this path on macOS if the bundle is blocked by system security or permission prompts.
+Use this path on macOS if the bundle is blocked by system security or permission prompts, or when you want to install directly from a local checkout.
 
 Supported Python versions: 3.11, 3.12, 3.13.
 
