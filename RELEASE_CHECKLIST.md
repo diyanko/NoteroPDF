@@ -43,8 +43,9 @@ Use this with `RELEASE_PROCESS.md`.
 
 ## Publish
 
-- [ ] Commit release changes
-- [ ] Tag `vX.Y.Z`
+- [ ] Commit release changes as `chore(release): vX.Y.Z`
+- [ ] Confirm `git log -1 --oneline` shows the release commit
+- [ ] Tag `vX.Y.Z` from that exact release commit
 - [ ] Push branch and tag
 - [ ] Verify the GitHub release artifacts and notes
 - [ ] Verify the GitHub release page contains the wheel, source tarball, and all standalone bundle zip assets

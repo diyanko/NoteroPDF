@@ -41,17 +41,30 @@ noteropdf sync
 
 Also verify one common repair case on a real workspace by clearing or mismatching a Notion PDF field and confirming a later `noteropdf sync` run restores it.
 
-## 3. Publish
+## 3. Create the release commit
+
+Every release should have one explicit release commit, and the release tag should
+point to that exact commit. Do not make unrelated commits between the release
+commit and the tag.
 
 ```bash
 git add .
-git commit -m "release: vX.Y.Z"
+git commit -m "chore(release): vX.Y.Z"
+git status -sb
+git log -1 --oneline
+```
+
+Confirm the latest commit is `chore(release): vX.Y.Z` before tagging.
+
+## 4. Tag and publish
+
+```bash
 git tag -a "vX.Y.Z" -m "Release vX.Y.Z"
 git push origin main
 git push origin "vX.Y.Z"
 ```
 
-## 4. Confirm GitHub artifacts
+## 5. Confirm GitHub artifacts
 
 The GitHub Release page should contain:
 
