@@ -13,7 +13,7 @@ NoteroPDF is preview-first. It reads from Zotero, shows what would change, and o
 - Zotero installed on your computer
 - a local personal Zotero library
 - Notero already syncing Zotero items to a Notion database
-- Python 3.11, 3.12, or 3.13 for the PyPI install
+- Python 3.10, 3.11, 3.12, or 3.13 for the PyPI install
 - a Notion integration token
 - your Notion database shared with that integration
 - a Notion files property for PDFs, usually named `PDF`

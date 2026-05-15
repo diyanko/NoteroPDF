@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "noteropdf"
-version = "0.3.0"
-description = "Deterministic local Zotero PDF to Notion files-property sync CLI"
+version = "0.3.1"
+description = "Upload local Zotero PDFs to matching Notion pages managed by Notero"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.10,<3.14"
 license = "MIT"
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -18,10 +18,11 @@ classifiers = [
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Utilities",
 ]
 dependencies = [
   "PyYAML==6.0.2",

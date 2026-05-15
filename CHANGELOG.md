@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.1 - 2026-05-15
+
+### Changed
+
+- simplified the README around the PyPI install path and first-time user workflow
+- expanded supported Python versions to include Python 3.10
+- updated PyPI package metadata with a clearer project description and broader utility topic classifier
+
 ## 0.3.0 - 2026-05-15
 
 ### Added

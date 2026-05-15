@@ -19,7 +19,7 @@ from .reporting import write_cleanup_reports, write_reports
 from .sync_engine import SyncEngine
 from .util import normalize_notion_target_inputs, zotero_maybe_open
 
-MIN_PYTHON = (3, 11)
+MIN_PYTHON = (3, 10)
 MAX_PYTHON_EXCLUSIVE = (3, 14)
 
 
@@ -627,13 +627,13 @@ def _check_supported_python() -> str | None:
         return (
             "Unsupported Python version: "
             f"{major}.{minor}. "
-            "Use Python 3.11, 3.12, or 3.13."
+            "Use Python 3.10, 3.11, 3.12, or 3.13."
         )
     if version >= MAX_PYTHON_EXCLUSIVE:
         return (
             "Unsupported Python version: "
             f"{major}.{minor}. "
-            "Use Python 3.11, 3.12, or 3.13."
+            "Use Python 3.10, 3.11, 3.12, or 3.13."
         )
     return None
 
