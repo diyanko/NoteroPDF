@@ -1,122 +1,23 @@
 # Contributing to NoteroPDF
 
-Thanks for helping improve NoteroPDF.
+Keep every change simple, deterministic, safe, and understandable to a non-technical user.
 
-This project is built for reliability first. If you contribute, please prioritize predictable behavior, clear errors, and safe defaults.
+## Expectations
 
-## Ways to contribute
+- Keep changes focused, with tests and documentation for changed behavior.
+- Match only through a unique Notero-created link attachment; never add URI,
+  DOI, title, or fuzzy fallbacks.
+- Read Zotero only through its enabled local API and never write to Zotero.
+- Keep the Notion token in the operating system credential store; do not add
+  file or environment-variable credential paths.
+- Never replace unknown, ambiguous, or concurrently changed Notion files.
+- Prefer actionable errors and a smaller dependency surface.
+- Never commit credentials, personal data, diagnostic logs, or generated output.
 
-- Report bugs
-- Improve documentation
-- Add tests
-- Improve reliability and error handling
-- Propose or implement new features
+The main boundaries are intentionally direct: `cli.py` guides the user, `auth.py` and `settings.py` manage the local PAT connection, `sync_engine.py` coordinates work, `notion_client.py` handles Notion, `zotero_repo.py` reads Zotero, and `state_store.py` records local state.
 
-## Before you start
+Use [RELEASING.md](./RELEASING.md) as the single source of truth for local
+setup, validation, commits, and releases. Use proportionate checks while
+developing, then run its complete pre-push checks for cross-cutting changes.
 
-1. Fork the repo and create a branch from `main`.
-2. Keep changes focused on one problem per pull request.
-3. If behavior changes, update docs in the same PR.
-
-## Local setup
-
-Use a plain Python `venv` plus `pip`. Do not assume conda, poetry, pipenv, or pyenv.
-
-1. Create and activate a virtual environment:
-
-```bash
-python -m venv .venv
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-# macOS/Linux
-source .venv/bin/activate
-```
-
-2. Install dependencies:
-
-```bash
-python -m pip install -U pip
-python -m pip install -e ".[dev]"
-```
-
-3. Run tests:
-
-```bash
-python -m pytest -q
-```
-
-4. (Optional) Run CLI help check:
-
-```bash
-noteropdf --help
-```
-
-5. (Optional) Build a standalone bundle:
-
-```bash
-pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py
-```
-
-## Pull request expectations
-
-Please include:
-- What changed
-- Why it changed
-- Any tradeoffs or limitations
-- How you tested it
-
-If relevant, include example logs or report snippets (remove private data).
-
-## Quality checklist
-
-Before opening a PR:
-- Tests pass locally
-- New logic has tests
-- Docs/config examples are updated if needed
-- No secrets are committed (`.env`, private tokens, personal paths)
-- Error messages are clear and actionable
-- If this is a release PR, run the checks in `RELEASE_CHECKLIST.md`
-- For maintainers publishing a release, follow `RELEASE_PROCESS.md` as the canonical flow
-
-## Coding guidelines
-
-- Prefer simple, explicit logic over clever shortcuts.
-- Keep matching behavior deterministic.
-- Avoid destructive behavior by default.
-- Keep user-facing language plain and direct.
-- Treat `setup`, `doctor`, `sync`, and `cleanup` as the public CLI surface.
-- Prefer making `sync` self-heal common remote drift instead of adding more user-facing recovery commands.
-
-### AI-assisted development policy
-
-This codebase is primarily built and maintained using AI assistants. If you are an AI assistant:
-1. You **MUST** read [AI_AGENTIC_DEVELOPMENT.md](./AI_AGENTIC_DEVELOPMENT.md) before making any changes.
-2. Favor readability, simplicity, and predictable behavior over complex abstractions. 
-3. Never swallow errors silently.
-
-## Reporting bugs
-
-Open an issue with:
-- What you expected
-- What happened
-- Steps to reproduce
-- OS + Python version
-- Command used
-- Relevant error output
-
-## Feature requests
-
-For new ideas, include:
-- Problem statement
-- Proposed behavior
-- Why it fits the project goals
-- Any migration or compatibility concerns
-
-## Security
-
-If you find a security issue, do not post sensitive details publicly first.
-Open a minimal issue asking for a private contact path.
-
-Maintainer contact:
-- GitHub: `@diyanko`
-- Preferred first contact: a GitHub issue in this repository
+Report security issues privately through the process in [SECURITY.md](./SECURITY.md); do not open a public issue with vulnerability details.

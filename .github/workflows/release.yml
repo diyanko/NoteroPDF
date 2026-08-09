@@ -5,129 +5,135 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-dists:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
+          cache: pip
+
+      - name: Validate tag, version, and commit
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          tag = os.environ["RELEASE_TAG"]
+          if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag) is None:
+              raise SystemExit(f"Release tag must be vMAJOR.MINOR.PATCH, got {tag!r}")
+          with open("pyproject.toml", "rb") as file:
+              version = tomllib.load(file)["project"]["version"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} does not match package version {version!r}")
+          PY
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tags must point to a commit on main." >&2
+            exit 1
+          }
 
       - name: Install build tooling
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ".[dev]"
+        run: python -m pip install ".[build]"
 
       - name: Build distributions
         run: python -m build
 
-      - name: Smoke test built wheel
+      - name: Validate distribution metadata and contents
+        run: |
+          python -m twine check --strict dist/*
+          check-wheel-contents dist/*.whl
+
+      - name: Smoke test installed wheel
         shell: bash
         run: |
-          python -m pip install --force-reinstall dist/*.whl
-          python -m noteropdf --help
+          wheel_path="$(realpath "$(find dist -maxdepth 1 -name '*.whl' -print -quit)")"
+          expected_version="${GITHUB_REF_NAME#v}"
+          python -m venv /tmp/noteropdf-wheel-smoke
+          /tmp/noteropdf-wheel-smoke/bin/python -m pip install "$wheel_path"
+          cd /tmp
+          /tmp/noteropdf-wheel-smoke/bin/python -m pip check
+          /tmp/noteropdf-wheel-smoke/bin/python -c "import importlib.metadata as m; assert m.version('noteropdf') == '$expected_version'"
+          /tmp/noteropdf-wheel-smoke/bin/noteropdf --help
+          /tmp/noteropdf-wheel-smoke/bin/noteropdf --version
+
+      - name: Smoke test source distribution
+        shell: bash
+        run: |
+          sdist_path="$(realpath "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)")"
+          expected_version="${GITHUB_REF_NAME#v}"
+          python -m venv /tmp/noteropdf-sdist-smoke
+          /tmp/noteropdf-sdist-smoke/bin/python -m pip install "$sdist_path"
+          cd /tmp
+          /tmp/noteropdf-sdist-smoke/bin/python -m pip check
+          /tmp/noteropdf-sdist-smoke/bin/python -c "import importlib.metadata as m; assert m.version('noteropdf') == '$expected_version'"
+          /tmp/noteropdf-sdist-smoke/bin/noteropdf --help
+          /tmp/noteropdf-sdist-smoke/bin/noteropdf --version
 
       - name: Upload Python distributions
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: python-dist
           path: dist/*
-
-  build-bundles:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset_suffix: linux
-          - os: macos-latest
-            asset_suffix: macos
-          - os: windows-latest
-            asset_suffix: windows
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install bundle tooling
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ".[dev]"
-
-      - name: Build standalone bundle
-        run: pyinstaller --noconfirm --clean --specpath build/pyinstaller --name noteropdf --onedir --collect-submodules keyring.backends noteropdf/__main__.py
-
-      - name: Smoke test standalone bundle
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            ./dist/noteropdf/noteropdf.exe --help
-          else
-            ./dist/noteropdf/noteropdf --help
-          fi
-
-      - name: Archive standalone bundle
-        env:
-          BUNDLE_SUFFIX: ${{ matrix.asset_suffix }}
-        run: >
-          python -c "import os, pathlib, shutil;
-          root = pathlib.Path('dist/noteropdf');
-          archive_base = pathlib.Path('dist') / ('noteropdf-' + os.environ['BUNDLE_SUFFIX']);
-          print(shutil.make_archive(str(archive_base), 'zip', root_dir=root.parent, base_dir=root.name))"
-
-      - name: Upload standalone bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: noteropdf-bundle-${{ matrix.asset_suffix }}
-          path: dist/noteropdf-${{ matrix.asset_suffix }}.zip
-
-  publish-release:
-    runs-on: ubuntu-latest
-    needs:
-      - build-dists
-      - build-bundles
-    steps:
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
-
-      - name: Publish GitHub release with artifacts
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release-artifacts/**/*.whl
-            release-artifacts/**/*.tar.gz
-            release-artifacts/**/*.zip
-          generate_release_notes: true
-          draft: false
-          prerelease: false
+          if-no-files-found: error
 
   publish-pypi:
-    runs-on: ubuntu-latest
-    needs:
-      - build-dists
-      - build-bundles
+    needs: build-dists
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/noteropdf
     permissions:
       id-token: write
     steps:
       - name: Download Python distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           name: python-dist
           path: dist
 
       - name: Publish Python distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+
+  publish-release:
+    needs:
+      - build-dists
+      - publish-pypi
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download Python distributions
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: python-dist
+          path: release-artifacts
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            release-artifacts/*.whl
+            release-artifacts/*.tar.gz
+          generate_release_notes: true
+          draft: false
+          prerelease: false

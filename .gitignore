@@ -1,12 +1,14 @@
 .env
+.env.*
 .venv/
 .vscode/
+.DS_Store
+.benchmarks/
+.mypy_cache/
+.ruff_cache/
 __pycache__/
 *.pyc
-.sync-state.sqlite3
-.sync-state.sqlite3-shm
-.sync-state.sqlite3-wal
-.sync-state.sqlite3.lock
+noteropdf.sqlite3*
 dist/
 build/
 *.egg-info/
@@ -15,5 +17,6 @@ logs/
 config.yaml
 .pytest_cache/
 .pytest-*/
-.tmp-review-config.yaml
+.coverage
+htmlcov/
 .opencode/
