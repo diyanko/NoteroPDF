@@ -1,6 +1,36 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
+
+## 0.4.0 - 2026-08-09
+
+### Added
+
+- one-command first run with Zotero detection, a paste-once Notion personal access token, database discovery, preview, and confirmation
+- secure token storage through a supported operating-system credential backend
+- stable Notion property-ID discovery and optional creation of a dedicated `NoteroPDF PDF` files property
+- exact preview-action approval, remote-file ownership records, and protection against concurrent Notion changes
+- Python 3.14 support
+
+### Changed
+
+- reduced the public CLI to `sync`, `connect`, and `doctor`; running without a command starts sync
+- made interactive sync preview and ask once, non-interactive sync preview only with a nonzero pending-work status, and `--apply` explicit
+- updated the Notion transport to the `2026-03-11` REST API, data sources, direct/multipart uploads, bounded retries, and the 10,000-page query safety limit
+- stored non-secret settings and sync state in a local `noteropdf.sqlite3` database
+- replaced per-item Notion queries with one filtered data-source snapshot per run
+- read the running Zotero library only through its supported local API
+- restricted page matching to each item's unique Notero-created link attachment
+- replaced per-run output files with a small rotating diagnostic log
+- made unknown files, duplicate item-to-page mappings, unsafe Zotero paths, and incomplete Notion snapshots fail closed
+
+### Removed
+
+- YAML and `.env` configuration, environment-variable token overrides, manual token/database-ID configuration, and persistent dry-run settings
+- the `setup` and `cleanup` commands, destructive page cleanup, and CSV/JSON/summary reports
+- `sync --force`, direct Zotero database access, and Zotero URI/DOI fallback matching
+- the PyYAML and python-dotenv runtime dependencies
+- unsigned standalone archives; PyPI/pipx is the supported installation path
 
 ## 0.3.1 - 2026-05-15
 

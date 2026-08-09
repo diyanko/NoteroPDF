@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import math
 import time
+import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -24,24 +27,44 @@ class NotionApiError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class NotionMatch:
-    page_id: str
-    page_url: str | None
-
-
-@dataclass(frozen=True)
 class NotionTarget:
     data_source_id: str
     label: str
-    database_id: str
-    url: str | None
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class NotionProperty:
+    id: str
+    name: str
+    type: str
+
+
+@dataclass(frozen=True)
+class NotionDataSourceSnapshot:
+    """One immutable view of the pages used for deterministic local matching."""
+
+    pages_by_id: dict[str, dict[str, Any]]
+
+    @staticmethod
+    def page_id_key(page_id: str) -> str:
+        return page_id.strip().lower().replace("-", "")
+
+    def get_page(self, page_id: str) -> dict[str, Any] | None:
+        return self.pages_by_id.get(self.page_id_key(page_id))
 
 
 class NotionClient:
     MULTIPART_THRESHOLD_BYTES = 20 * 1024 * 1024
     ATTACHMENT_FILENAME_MAX_CHARS = 100
+    TRANSIENT_STATUS_CODES = frozenset({409, 429, 500, 503, 504})
 
-    def __init__(self, token: str, notion_version: str, max_retries: int = 5):
+    def __init__(
+        self,
+        token: str,
+        notion_version: str,
+        max_retries: int = 5,
+    ):
         self._session = requests.Session()
         self._base = "https://api.notion.com/v1"
         self._headers = {
@@ -62,27 +85,18 @@ class NotionClient:
         path: str,
         *,
         json_body: Any | None = None,
-        raw_data: bytes | None = None,
-        extra_headers: dict[str, str] | None = None,
         allow_404: bool = False,
     ) -> dict[str, Any]:
         url = f"{self._base}{path}"
         headers = dict(self._headers)
-        if extra_headers:
-            headers.update(extra_headers)
 
         attempt = 0
         while True:
             attempt += 1
             try:
-                if raw_data is not None:
-                    resp = self._session.request(
-                        method, url, headers=headers, data=raw_data, timeout=60
-                    )
-                else:
-                    resp = self._session.request(
-                        method, url, headers=headers, json=json_body, timeout=60
-                    )
+                resp = self._session.request(
+                    method, url, headers=headers, json=json_body, timeout=60
+                )
             except requests.RequestException as exc:
                 if attempt >= self._max_retries:
                     raise NotionApiError(
@@ -93,42 +107,57 @@ class NotionClient:
                 time.sleep(min(2.0 * attempt, 8.0))
                 continue
 
-            if resp.status_code == 429:
+            if (
+                resp.status_code in self.TRANSIENT_STATUS_CODES
+                or resp.status_code >= 500
+            ):
                 if attempt >= self._max_retries:
-                    raise NotionApiError(
-                        "NOTION_RATE_LIMIT",
-                        "Notion rate-limited requests too many times.",
-                        429,
-                        hint="Wait a little and run the command again.",
-                    )
-                retry_after = resp.headers.get("Retry-After", "1")
-                try:
-                    delay = float(retry_after)
-                except ValueError:
-                    delay = 1.0
-                time.sleep(max(0.5, delay))
-                continue
-
-            if resp.status_code >= 500:
-                if attempt >= self._max_retries:
+                    if resp.status_code == 429:
+                        raise NotionApiError(
+                            "NOTION_RATE_LIMIT",
+                            "Notion rate-limited requests too many times.",
+                            429,
+                            hint="Wait a little and run the command again.",
+                        )
                     raise NotionApiError(
                         "NOTION_API_ERROR",
-                        f"Notion server error: {resp.status_code}",
+                        f"Notion returned transient error {resp.status_code} too many times.",
                         resp.status_code,
                         hint="Notion is temporarily unavailable. Try again later.",
                     )
-                time.sleep(min(2.0 * attempt, 8.0))
+                retry_after = resp.headers.get("Retry-After", "1")
+                if resp.status_code == 429 or "Retry-After" in resp.headers:
+                    try:
+                        delay = float(retry_after)
+                    except ValueError:
+                        delay = 1.0
+                    time.sleep(max(0.5, delay))
+                else:
+                    time.sleep(min(2.0 * attempt, 8.0))
                 continue
 
             if allow_404 and resp.status_code == 404:
                 return {"_not_found": True}
 
-            if resp.status_code in (401, 403):
+            if resp.status_code == 401:
                 raise NotionApiError(
                     "NOTION_AUTH_ERROR",
-                    "Notion rejected authentication for this request.",
+                    "Notion rejected authentication for the saved token.",
                     resp.status_code,
-                    hint="Check your Notion token and confirm the integration has access to the target database.",
+                    hint=(
+                        "Run `noteropdf connect` and paste a valid personal access "
+                        "token with the Notion API capability."
+                    ),
+                )
+            if resp.status_code == 403:
+                raise NotionApiError(
+                    "NOTION_AUTH_ERROR",
+                    "Notion denied access to this request.",
+                    resp.status_code,
+                    hint=(
+                        "Confirm the token has the Notion API capability and that your "
+                        "Notion account can edit the selected database."
+                    ),
                 )
 
             if resp.status_code >= 400:
@@ -153,7 +182,7 @@ class NotionClient:
             payload = resp.json()
             message = str(payload.get("message", message))
             api_code = str(payload.get("code", "")).strip().lower()
-        except Exception:
+        except (ValueError, AttributeError):
             payload = None
         normalized_message = message.lower()
 
@@ -174,14 +203,17 @@ class NotionClient:
                 "NOTION_SCHEMA_ERROR",
                 f"Notion request validation failed: {message}",
                 resp.status_code,
-                hint="Check property names and types in config.yaml, then run doctor again.",
+                hint="Run `noteropdf connect` to select and validate the database again.",
             )
         if resp.status_code == 404:
             return NotionApiError(
                 "NOTION_SCHEMA_ERROR",
                 f"Notion resource was not found: {message}",
                 resp.status_code,
-                hint="Verify your database/data source IDs and that the integration has access.",
+                hint=(
+                    "Run `noteropdf connect` and confirm the selected database and "
+                    "its properties are still available."
+                ),
             )
         if resp.status_code in (408,):
             return NotionApiError(
@@ -215,7 +247,7 @@ class NotionClient:
 
     def get_workspace_upload_limit_bytes(self) -> int | None:
         payload = self._get_me()
-        limits = (((payload.get("bot") or {}).get("workspace_limits")) or {})
+        limits = ((payload.get("bot") or {}).get("workspace_limits")) or {}
         raw = limits.get("max_file_upload_size_in_bytes")
         if raw is None:
             return None
@@ -241,31 +273,15 @@ class NotionClient:
             return "".join(parts).strip()
         return ""
 
-    @classmethod
-    def property_plain_text(cls, value: Any) -> str | None:
-        if isinstance(value, str):
-            cleaned = value.strip()
-            return cleaned or None
-        if not isinstance(value, dict):
-            return None
-
-        ptype = str(value.get("type") or "").strip()
-        if ptype == "url":
-            raw = str(value.get("url") or "").strip()
-            return raw or None
-        if ptype == "rich_text":
-            raw = cls._title_text(value.get("rich_text"))
-            return raw or None
-        if ptype == "title":
-            raw = cls._title_text(value.get("title"))
-            return raw or None
-        return None
-
     def list_accessible_data_sources(self) -> list[NotionTarget]:
         cursor: str | None = None
         targets: dict[str, NotionTarget] = {}
         while True:
-            body: dict[str, Any] = {"query": "", "page_size": 100}
+            body: dict[str, Any] = {
+                "query": "",
+                "page_size": 100,
+                "filter": {"property": "object", "value": "data_source"},
+            }
             if cursor:
                 body["start_cursor"] = cursor
             payload = self._request("POST", "/search", json_body=body)
@@ -278,61 +294,27 @@ class NotionClient:
                 title = self._title_text(row.get("title")) or self._title_text(
                     row.get("name")
                 )
-                database_id = ""
-                raw_parent = row.get("parent") or {}
-                if isinstance(raw_parent, dict):
-                    database_id = str(
-                        raw_parent.get("database_id") or raw_parent.get("page_id") or ""
-                    ).strip()
                 targets[data_source_id] = NotionTarget(
                     data_source_id=data_source_id,
                     label=title or data_source_id,
-                    database_id=database_id,
                     url=str(row.get("url") or "").strip() or None,
+                )
+            request_status = payload.get("request_status") or {}
+            if request_status.get("type") == "incomplete":
+                raise NotionApiError(
+                    "NOTION_SCHEMA_ERROR",
+                    "Notion stopped database discovery at its search-result limit, "
+                    "so NoteroPDF cannot present a complete safe choice list.",
+                    hint="Reduce the number of accessible databases or use a more focused workspace.",
                 )
             if not payload.get("has_more"):
                 break
             cursor = str(payload.get("next_cursor") or "").strip() or None
             if cursor is None:
                 break
-        return sorted(targets.values(), key=lambda item: (item.label.lower(), item.data_source_id))
-
-    def resolve_target_ids(
-        self, configured_database_id: str, configured_data_source_id: str
-    ) -> tuple[str, str]:
-        if configured_database_id:
-            return configured_database_id, self.resolve_data_source_id(
-                configured_database_id, configured_data_source_id
-            )
-
-        if configured_data_source_id:
-            return "", configured_data_source_id
-
-        raise NotionApiError(
-            "NOTION_SCHEMA_ERROR",
-            "Set notion.database_id or notion.data_source_id explicitly.",
-            hint="Paste your Notion database URL into setup, or set notion.database_id in config.yaml.",
+        return sorted(
+            targets.values(), key=lambda item: (item.label.lower(), item.data_source_id)
         )
-
-    def resolve_data_source_id(
-        self, database_id: str, configured_data_source_id: str
-    ) -> str:
-        if configured_data_source_id:
-            return configured_data_source_id
-
-        payload = self._request("GET", f"/databases/{database_id}")
-        data_sources = payload.get("data_sources") or []
-        if len(data_sources) != 1:
-            raise NotionApiError(
-                "NOTION_SCHEMA_ERROR",
-                "Unable to deterministically resolve data source ID from database. Please set notion.data_source_id explicitly.",
-            )
-        ds_id = data_sources[0].get("id", "")
-        if not ds_id:
-            raise NotionApiError(
-                "NOTION_SCHEMA_ERROR", "Resolved data source has no id"
-            )
-        return ds_id
 
     def get_data_source_schema(self, data_source_id: str) -> dict[str, Any]:
         cached = self._schema_cache.get(data_source_id)
@@ -342,32 +324,100 @@ class NotionClient:
         self._schema_cache[data_source_id] = schema
         return schema
 
-    def validate_pdf_property(self, data_source_id: str, property_name: str) -> None:
+    def list_data_source_properties(
+        self, data_source_id: str
+    ) -> tuple[NotionProperty, ...]:
         schema = self.get_data_source_schema(data_source_id)
-        props = schema.get("properties") or {}
-        if property_name not in props:
-            raise NotionApiError(
-                "NOTION_SCHEMA_ERROR",
-                f"Missing required Notion property: {property_name}",
+        properties: list[NotionProperty] = []
+        for name, raw in (schema.get("properties") or {}).items():
+            if not isinstance(raw, dict):
+                continue
+            property_id = str(raw.get("id") or "").strip()
+            property_type = str(raw.get("type") or "").strip()
+            if not property_id or not property_type:
+                continue
+            properties.append(
+                NotionProperty(id=property_id, name=str(name), type=property_type)
             )
-        ptype = props[property_name].get("type")
-        if ptype != "files":
-            raise NotionApiError(
-                "NOTION_SCHEMA_ERROR",
-                f"Property '{property_name}' exists but is not type 'files'",
-            )
+        return tuple(sorted(properties, key=lambda prop: (prop.name.lower(), prop.id)))
 
-    def has_property(self, data_source_id: str, property_name: str) -> bool:
-        schema = self.get_data_source_schema(data_source_id)
-        props = schema.get("properties") or {}
-        return property_name in props
-
-    def get_property_type(self, data_source_id: str, property_name: str) -> str | None:
-        schema = self.get_data_source_schema(data_source_id)
-        props = schema.get("properties") or {}
-        if property_name not in props:
+    def resolve_property(
+        self, data_source_id: str, property_ref: str
+    ) -> NotionProperty | None:
+        ref = property_ref.strip()
+        if not ref:
             return None
-        return props[property_name].get("type")
+        properties = self.list_data_source_properties(data_source_id)
+        for prop in properties:
+            if prop.id == ref:
+                return prop
+        return None
+
+    def find_files_property(
+        self, data_source_id: str, name: str
+    ) -> NotionProperty | None:
+        properties = self.list_data_source_properties(data_source_id)
+        return next(
+            (prop for prop in properties if prop.type == "files" and prop.name == name),
+            None,
+        )
+
+    def create_files_property(
+        self, data_source_id: str, property_name: str = "NoteroPDF PDF"
+    ) -> NotionProperty:
+        name = property_name.strip()
+        if not name:
+            raise ValueError("property_name must not be empty")
+        existing = next(
+            (
+                prop
+                for prop in self.list_data_source_properties(data_source_id)
+                if prop.name == name
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing.type == "files":
+                return existing
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"A Notion property named '{name}' already exists with type "
+                f"'{existing.type}'. Rename it before creating the dedicated files "
+                "property; NoteroPDF will not change its type.",
+            )
+        self._request(
+            "PATCH",
+            f"/data_sources/{data_source_id}",
+            json_body={"properties": {name: {"files": {}}}},
+        )
+        self._schema_cache.pop(data_source_id, None)
+        prop = next(
+            (
+                candidate
+                for candidate in self.list_data_source_properties(data_source_id)
+                if candidate.name == name
+            ),
+            None,
+        )
+        if prop is None or prop.type != "files":
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Notion did not return the newly created files property '{name}'.",
+            )
+        return prop
+
+    def validate_pdf_property(self, data_source_id: str, property_id: str) -> None:
+        prop = self.resolve_property(data_source_id, property_id)
+        if prop is None:
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Missing required Notion property: {property_id}",
+            )
+        if prop.type != "files":
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                f"Property '{property_id}' exists but is not type 'files'",
+            )
 
     def get_page(self, page_id: str) -> dict[str, Any] | None:
         payload = self._request("GET", f"/pages/{page_id}", allow_404=True)
@@ -376,125 +426,112 @@ class NotionClient:
         return payload
 
     def list_data_source_pages(
-        self, data_source_id: str, *, include_trashed: bool = False
+        self,
+        data_source_id: str,
+        *,
+        property_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         pages: list[dict[str, Any]] = []
         cursor: str | None = None
+        query = urllib.parse.urlencode(
+            [("filter_properties[]", value) for value in property_ids if value]
+        )
+        path = f"/data_sources/{data_source_id}/query"
+        if query:
+            path = f"{path}?{query}"
         while True:
-            body: dict[str, Any] = {"page_size": 100}
+            body: dict[str, Any] = {"page_size": 100, "result_type": "page"}
             if cursor:
                 body["start_cursor"] = cursor
-            payload = self._request(
-                "POST", f"/data_sources/{data_source_id}/query", json_body=body
-            )
+            payload = self._request("POST", path, json_body=body)
             for row in payload.get("results") or []:
                 if row.get("object") != "page":
                     continue
-                if not include_trashed and row.get("in_trash", False):
+                if row.get("in_trash", False):
                     continue
                 pages.append(row)
+            request_status = payload.get("request_status") or {}
+            if request_status.get("type") == "incomplete":
+                raise NotionApiError(
+                    "NOTION_SCHEMA_ERROR",
+                    "The selected Notion data source exceeds the API's 10,000-page "
+                    "query limit, so NoteroPDF cannot build a complete safe preview.",
+                    hint="Use a smaller Notero database before syncing PDFs.",
+                )
             if not payload.get("has_more"):
                 return pages
             cursor = str(payload.get("next_cursor") or "").strip() or None
             if cursor is None:
                 return pages
 
-    def get_page_property_text(
-        self, page: dict[str, Any], property_name: str
-    ) -> str | None:
+    @staticmethod
+    def get_page_property(
+        page: dict[str, Any], property_ref: str
+    ) -> dict[str, Any] | None:
         props = page.get("properties") or {}
-        prop = props.get(property_name)
-        return self.property_plain_text(prop)
-
-    def get_page_title_text(self, page: dict[str, Any]) -> str | None:
-        props = page.get("properties") or {}
+        direct = props.get(property_ref)
+        if isinstance(direct, dict):
+            return direct
         for prop in props.values():
-            title = self.property_plain_text(prop)
-            if isinstance(prop, dict) and prop.get("type") == "title" and title:
-                return title
+            if isinstance(prop, dict) and str(prop.get("id") or "") == property_ref:
+                return prop
         return None
 
-    def query_by_property_equals(
+    @classmethod
+    def files_property_signature(
+        cls, page: dict[str, Any], property_ref: str
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Return the ordered, stable identity of a page's files property."""
+        prop = cls.get_page_property(page, property_ref) or {}
+        raw_files = prop.get("files") or []
+        signatures: list[tuple[str, str, str]] = []
+        for row in raw_files:
+            if not isinstance(row, dict):
+                continue
+            file_type = str(row.get("type") or "").strip()
+            type_payload = row.get(file_type) if file_type else None
+            identity = ""
+            if isinstance(type_payload, dict):
+                identity = str(type_payload.get("id") or "").strip()
+                if not identity:
+                    raw_url = str(type_payload.get("url") or "").strip()
+                    if file_type == "file" and raw_url:
+                        # Notion refreshes the signed query string on hosted-file
+                        # URLs. The path is the stable remote object identity.
+                        parsed = urllib.parse.urlsplit(raw_url)
+                        identity = parsed.path or raw_url
+                    else:
+                        identity = raw_url
+            signatures.append((str(row.get("name") or "").strip(), file_type, identity))
+        return tuple(signatures)
+
+    def build_data_source_snapshot(
         self,
         data_source_id: str,
-        property_name: str,
-        value: str,
-        property_type: str,
-    ) -> list[NotionMatch]:
-        if property_type == "url":
-            condition = {"url": {"equals": value}}
-        elif property_type == "title":
-            condition = {"title": {"equals": value}}
-        else:
-            condition = {"rich_text": {"equals": value}}
-
-        body = {
-            "filter": {
-                "property": property_name,
-                **condition,
-            },
-            "page_size": 100,
-        }
-
-        matches: list[NotionMatch] = []
-        cursor: str | None = None
-        while True:
-            query_body = dict(body)
-            if cursor:
-                query_body["start_cursor"] = cursor
-            payload = self._request(
-                "POST", f"/data_sources/{data_source_id}/query", json_body=query_body
+        *,
+        pdf_property: str = "",
+    ) -> NotionDataSourceSnapshot:
+        property_ids = (pdf_property,) if pdf_property else ()
+        pages = tuple(
+            self.list_data_source_pages(
+                data_source_id,
+                property_ids=property_ids,
             )
-            matches.extend(self._extract_matches(payload))
-            if len(matches) > 1:
-                return matches
-            if not payload.get("has_more"):
-                return matches
-            cursor = payload.get("next_cursor")
-            if not cursor:
-                return matches
-
-    def query_by_doi(
-        self,
-        data_source_id: str,
-        doi_property_name: str,
-        doi: str,
-        property_type: str,
-    ) -> list[NotionMatch]:
-        return self.query_by_property_equals(
-            data_source_id=data_source_id,
-            property_name=doi_property_name,
-            value=doi,
-            property_type=property_type,
         )
-
-    def _extract_matches(self, payload: dict[str, Any]) -> list[NotionMatch]:
-        out: list[NotionMatch] = []
-        for row in payload.get("results") or []:
-            out.append(NotionMatch(page_id=row.get("id", ""), page_url=row.get("url")))
-        out = [x for x in out if x.page_id]
-        return out
-
-    def page_files_count(self, page_id: str, property_name: str) -> int:
-        return len(self.get_page_files(page_id, property_name))
-
-    def get_page_files(self, page_id: str, property_name: str) -> list[dict[str, Any]]:
-        page = self.get_page(page_id)
-        if not page:
-            return []
-        props = page.get("properties") or {}
-        prop = props.get(property_name) or {}
-        files = prop.get("files") or []
-        if not isinstance(files, list):
-            return []
-        return [row for row in files if isinstance(row, dict)]
+        by_id: dict[str, dict[str, Any]] = {}
+        for page in pages:
+            page_id = str(page.get("id") or "").strip()
+            if not page_id:
+                continue
+            by_id[NotionDataSourceSnapshot.page_id_key(page_id)] = page
+        return NotionDataSourceSnapshot(pages_by_id=by_id)
 
     def create_file_upload(
         self, filename: str, content_type: str, *, file_size: int
     ) -> dict[str, Any]:
         multi_part = file_size > self.MULTIPART_THRESHOLD_BYTES
         body: dict[str, Any] = {
-            "filename": filename,
+            "filename": self.normalize_attachment_filename(filename),
             "content_type": content_type,
             "mode": "multi_part" if multi_part else "single_part",
         }
@@ -522,8 +559,12 @@ class NotionClient:
             or create_payload.get("upload_url")
             or f"{self._base}/file_uploads/{upload_id}/send"
         )
-        complete_url = str(upload_obj.get("complete_url") or create_payload.get("complete_url") or "")
-        is_multi_part = size_bytes > self.MULTIPART_THRESHOLD_BYTES or bool(complete_url)
+        complete_url = str(
+            upload_obj.get("complete_url") or create_payload.get("complete_url") or ""
+        )
+        is_multi_part = size_bytes > self.MULTIPART_THRESHOLD_BYTES or bool(
+            complete_url
+        )
         if is_multi_part:
             self._send_multi_part_bytes(upload_url, upload_id, pdf_path, upload_timeout)
             self.complete_file_upload(upload_id, complete_url=complete_url)
@@ -552,20 +593,18 @@ class NotionClient:
     def _send_single_part_bytes(
         self, upload_url: str, pdf_path: Path, upload_timeout: int
     ) -> None:
-        try:
+        filename = self.normalize_attachment_filename(pdf_path.name)
+
+        def send() -> requests.Response:
             with pdf_path.open("rb") as f:
-                resp = self._session.post(
+                return self._session.post(
                     upload_url,
                     headers=self._auth_headers(),
-                    files={"file": (pdf_path.name, f, "application/pdf")},
+                    files={"file": (filename, f, "application/pdf")},
                     timeout=upload_timeout,
                 )
-        except requests.RequestException as exc:
-            raise NotionApiError(
-                "NOTION_NETWORK_ERROR",
-                f"Network error while uploading file bytes: {exc}",
-                hint="Check your connection and retry sync.",
-            ) from exc
+
+        resp = self._send_upload_request(send)
         if resp.status_code >= 400:
             self._raise_upload_http_error(resp)
 
@@ -573,18 +612,28 @@ class NotionClient:
         self, upload_url: str, upload_id: str, pdf_path: Path, upload_timeout: int
     ) -> None:
         part_number = 1
+        filename = self.normalize_attachment_filename(pdf_path.name)
         try:
             with pdf_path.open("rb") as f:
                 while True:
                     chunk = f.read(self.MULTIPART_THRESHOLD_BYTES)
                     if not chunk:
                         break
-                    resp = self._session.post(
-                        upload_url,
-                        headers=self._auth_headers(),
-                        data={"part_number": str(part_number)},
-                        files={"file": (pdf_path.name, chunk, "application/pdf")},
-                        timeout=upload_timeout,
+                    resp = self._send_upload_request(
+                        partial(
+                            self._session.post,
+                            upload_url,
+                            headers=self._auth_headers(),
+                            data={"part_number": str(part_number)},
+                            files={
+                                "file": (
+                                    filename,
+                                    chunk,
+                                    "application/pdf",
+                                )
+                            },
+                            timeout=upload_timeout,
+                        )
                     )
                     if resp.status_code >= 400:
                         self._raise_upload_http_error(resp)
@@ -598,33 +647,66 @@ class NotionClient:
 
     def complete_file_upload(self, upload_id: str, *, complete_url: str = "") -> None:
         if complete_url:
-            try:
-                resp = self._session.post(
+            resp = self._send_upload_request(
+                lambda: self._session.post(
                     complete_url,
                     headers=self._auth_headers(),
                     json={},
                     timeout=60,
                 )
-            except requests.RequestException as exc:
-                raise NotionApiError(
-                    "NOTION_NETWORK_ERROR",
-                    f"Network error while completing file upload: {exc}",
-                    hint="Check your connection and retry sync.",
-                ) from exc
+            )
             if resp.status_code >= 400:
                 self._raise_upload_http_error(resp)
             return
         self._request("POST", f"/file_uploads/{upload_id}/complete", json_body={})
 
+    def _send_upload_request(
+        self, send: Callable[[], requests.Response]
+    ) -> requests.Response:
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = send()
+            except requests.RequestException as exc:
+                if attempt >= self._max_retries:
+                    raise NotionApiError(
+                        "NOTION_NETWORK_ERROR",
+                        f"Network error while uploading file bytes: {exc}",
+                        hint="Check your connection and retry sync.",
+                    ) from exc
+                time.sleep(min(2.0 * attempt, 8.0))
+                continue
+
+            if (
+                response.status_code in self.TRANSIENT_STATUS_CODES
+                or response.status_code >= 500
+            ) and attempt < self._max_retries:
+                raw_delay = response.headers.get("Retry-After", "")
+                try:
+                    delay = float(raw_delay) if raw_delay else min(2.0 * attempt, 8.0)
+                except ValueError:
+                    delay = 1.0
+                time.sleep(max(0.5, delay))
+                continue
+            return response
+
     def _raise_upload_http_error(self, resp: requests.Response) -> None:
         detail = (resp.text or "").strip().replace("\n", " ")
         normalized_detail = detail.lower()
         if resp.status_code in (401, 403):
+            hint = (
+                "Run `noteropdf connect` and paste a valid personal access token with "
+                "the Notion API capability."
+                if resp.status_code == 401
+                else "Confirm the token's Notion API capability and your edit access "
+                "to the selected database."
+            )
             raise NotionApiError(
                 "NOTION_AUTH_ERROR",
                 f"Upload rejected by Notion auth/permissions: {resp.status_code} {detail}",
                 resp.status_code,
-                hint="Verify token permissions and integration access to the target database.",
+                hint=hint,
             )
         if resp.status_code == 413 or "file too large" in normalized_detail:
             raise NotionApiError(
@@ -655,13 +737,13 @@ class NotionClient:
         )
 
     def attach_file_upload_to_page(
-        self, page_id: str, property_name: str, upload_id: str, filename: str
-    ) -> None:
+        self, page_id: str, property_id: str, upload_id: str, filename: str
+    ) -> dict[str, Any]:
         safe_name = self.normalize_attachment_filename(filename)
 
         body = {
             "properties": {
-                property_name: {
+                property_id: {
                     "files": [
                         {
                             "name": safe_name,
@@ -674,7 +756,4 @@ class NotionClient:
                 }
             }
         }
-        self._request("PATCH", f"/pages/{page_id}", json_body=body)
-
-    def trash_page(self, page_id: str) -> None:
-        self._request("PATCH", f"/pages/{page_id}", json_body={"in_trash": True})
+        return self._request("PATCH", f"/pages/{page_id}", json_body=body)

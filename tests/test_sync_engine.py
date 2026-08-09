@@ -1,34 +1,39 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from noteropdf.notion_client import NotionApiError, NotionClient
+import pytest
+
+from noteropdf.models import CandidatePdf, ZoteroItem
+from noteropdf.notion_client import (
+    NotionApiError,
+    NotionClient,
+    NotionDataSourceSnapshot,
+)
 from noteropdf.state_store import StateRecord
 from noteropdf.status import Status
-from noteropdf.sync_engine import MatchResult, SyncEngine
-from noteropdf.models import CandidatePdf, SyncRow, ZoteroItem
-from noteropdf.util import parse_notion_page_id_from_url
+from noteropdf.sync_engine import MatchResult, PreviewAction, SyncEngine
+from noteropdf.util import sha256_file
 
 
 def _make_item(
     *,
     key: str = "ABC123",
-    zotero_web_uri: str | None = None,
     notero_page_url: str | None = None,
 ) -> ZoteroItem:
     return ZoteroItem(
         item_id=1,
         key=key,
-        library_id=1,
         title="Paper",
-        doi=None,
         zotero_uri=f"zotero://select/library/items/{key}",
-        zotero_web_uri=zotero_web_uri,
         notero_page_url=notero_page_url,
     )
 
 
-def _make_pdf(tmp_path: Path, name: str = "sample.pdf", size_bytes: int = 9) -> CandidatePdf:
+def _make_pdf(
+    tmp_path: Path, name: str = "sample.pdf", size_bytes: int = 9
+) -> CandidatePdf:
     pdf_path = tmp_path / name
     pdf_path.write_bytes(b"a" * size_bytes)
     stat = pdf_path.stat()
@@ -45,26 +50,65 @@ def _make_engine(
     pdf: CandidatePdf,
     remote_files: list[dict[str, Any]] | None = None,
     state_record: StateRecord | None = None,
-    dry_run: bool = False,
+    preview: bool = False,
     workspace_limit: int | None = None,
     workspace_limit_error: NotionApiError | None = None,
     create_error: NotionApiError | None = None,
     attach_error: NotionApiError | None = None,
+    preserve_missing_remote_identity: bool = False,
 ):
-    class _State:
-        def get(self, _):
-            return state_record
+    normalized_remote_files: list[dict[str, Any]] = []
+    for index, raw in enumerate(remote_files or []):
+        remote = dict(raw)
+        file_type = str(remote.get("type") or "file")
+        remote["type"] = file_type
+        if file_type == "file" and not isinstance(remote.get("file"), dict):
+            remote["file"] = {
+                "url": f"https://files.notion.test/remote-{index}?signature=old"
+            }
+        normalized_remote_files.append(remote)
 
-        def upsert(self, _):
-            return None
+    page = {
+        "id": "page-1",
+        "properties": {
+            "pdf-id": {
+                "id": "pdf-id",
+                "type": "files",
+                "files": normalized_remote_files,
+            }
+        },
+    }
+    effective_state_record = state_record
+    signature = NotionClient.files_property_signature(page, "pdf-id")
+    if (
+        effective_state_record is not None
+        and not preserve_missing_remote_identity
+        and len(signature) == 1
+        and effective_state_record.remote_file_identity is None
+    ):
+        effective_state_record = replace(
+            effective_state_record,
+            remote_file_name=signature[0][0],
+            remote_file_type=signature[0][1],
+            remote_file_identity=signature[0][2],
+        )
+
+    class _State:
+        def __init__(self):
+            self.saved = None
+
+        def get(self, _):
+            return effective_state_record
+
+        def upsert(self, record):
+            self.saved = record
 
     class _Notion:
         def __init__(self):
             self.create_calls = 0
             self.attach_calls = 0
 
-        def get_page_files(self, *_):
-            return list(remote_files or [])
+        get_page_property = staticmethod(NotionClient.get_page_property)
 
         def get_workspace_upload_limit_bytes(self):
             if workspace_limit_error is not None:
@@ -86,17 +130,39 @@ def _make_engine(
                 raise create_error
             return "upload-1"
 
-        def attach_file_upload_to_page(self, **_):
+        def get_page(self, _page_id):
+            return page
+
+        def attach_file_upload_to_page(self, **kwargs):
             self.attach_calls += 1
             if attach_error is not None:
                 raise attach_error
-            return None
+            filename = NotionClient.normalize_attachment_filename(kwargs["filename"])
+            return {
+                "id": "page-1",
+                "properties": {
+                    "pdf-id": {
+                        "id": "pdf-id",
+                        "type": "files",
+                        "files": [
+                            {
+                                "name": filename,
+                                "type": "file",
+                                "file": {
+                                    "url": "https://files.notion.test/upload-1"
+                                    "?signature=new"
+                                },
+                            }
+                        ],
+                    }
+                },
+            }
 
     engine = SyncEngine.__new__(SyncEngine)
     casted: Any = engine
     casted.cfg = SimpleNamespace(
-        sync=SimpleNamespace(dry_run=dry_run, log_level="INFO", report_dir=tmp_path),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
+        sync=SimpleNamespace(),
+        notion=SimpleNamespace(pdf_property_id="pdf-id"),
     )
     casted.state = _State()
     casted.notion = _Notion()
@@ -109,7 +175,13 @@ def _make_engine(
         warning=lambda *args, **kwargs: None,
         error=lambda *args, **kwargs: None,
     )
-    casted._get_cached_hash = lambda _path: "dummy-hash"
+    casted._get_cached_hash = lambda path: sha256_file(Path(path))
+    casted._apply_writes = not preview
+    casted._preview_actions = {}
+    casted._approved_actions = None
+    casted._match_cache = None
+    casted._pdf_property_ref = "pdf-id"
+    casted._snapshot = NotionDataSourceSnapshot(pages_by_id={"page1": page})
     casted._resolve_match = lambda _item: MatchResult(
         Status.OK, "page-1", "https://notion.so/page-1", None
     )
@@ -117,122 +189,14 @@ def _make_engine(
     return engine, casted.notion
 
 
-def _make_cleanup_engine(
-    *,
-    items: list[ZoteroItem],
-    pages: list[dict[str, Any]],
-    has_uri_property: bool = True,
-    trash_error: NotionApiError | None = None,
-):
-    class _Notion:
-        def __init__(self):
-            self.trash_calls: list[str] = []
-
-        def resolve_target_ids(self, **_):
-            return "", "ds-1"
-
-        def has_property(self, *_):
-            return has_uri_property
-
-        def list_data_source_pages(self, *_args, **_kwargs):
-            return list(pages)
-
-        def get_page_property_text(self, page, property_name):
-            assert property_name == "Zotero URI"
-            props = page.get("properties") or {}
-            prop = props.get(property_name) or {}
-            if prop.get("type") == "url":
-                return prop.get("url")
-            if prop.get("type") == "rich_text":
-                rich_text = prop.get("rich_text") or []
-                return rich_text[0].get("plain_text") if rich_text else None
-            return None
-
-        def get_page_title_text(self, page):
-            props = page.get("properties") or {}
-            title_prop = props.get("Name") or {}
-            title = title_prop.get("title") or []
-            return title[0].get("plain_text") if title else None
-
-        def trash_page(self, page_id: str):
-            self.trash_calls.append(page_id)
-            if trash_error is not None:
-                raise trash_error
-
+def test_sync_refuses_apply_without_approved_preview_actions():
     engine = SyncEngine.__new__(SyncEngine)
-    casted: Any = engine
-    casted.cfg = SimpleNamespace(
-        notion=SimpleNamespace(
-            database_id="",
-            data_source_id="ds-1",
-            zotero_uri_property_name="Zotero URI",
-        )
-    )
-    casted.notion = _Notion()
-    casted.zotero = SimpleNamespace(
-        all_items=lambda: list(items),
-        extract_notero_page_id=lambda item: (
-            parse_notion_page_id_from_url(item.notero_page_url)
-            if item.notero_page_url
-            else None
-        ),
-    )
-    casted.state = None
-    casted._logger = SimpleNamespace(
-        debug=lambda *args, **kwargs: None,
-        info=lambda *args, **kwargs: None,
-        warning=lambda *args, **kwargs: None,
-        error=lambda *args, **kwargs: None,
-    )
-    casted.data_source_id = None
-    return engine, casted.notion
 
-
-def test_sync_progress_callback_reports_start_periodic_and_finished():
-    engine = SyncEngine.__new__(SyncEngine)
-    items = [_make_item(key=f"KEY{i}") for i in range(25)]
-    progress: list[tuple[int, int]] = []
-
-    casted: Any = engine
-    casted.cfg = SimpleNamespace(notion=SimpleNamespace(pdf_property_name="PDF"))
-    casted.notion = SimpleNamespace(validate_pdf_property=lambda *_: None)
-    casted.zotero = SimpleNamespace(all_items=lambda: list(items))
-    casted._resolve_data_source = lambda: "ds"
-    casted._logger = SimpleNamespace(
-        debug=lambda *args, **kwargs: None,
-        warning=lambda *args, **kwargs: None,
-    )
-
-    def _fake_sync_one(item, *, force=False):
-        return SyncRow(
-            zotero_item_key=item.key,
-            title=item.title,
-            zotero_uri=item.zotero_uri,
-            notion_page_id="page-1",
-            notion_page_url="https://notion.so/page-1",
-            local_pdf_path="/tmp/a.pdf",
-            action_taken="quick_fingerprint_match",
-            final_status=Status.UNCHANGED.value,
-            error_message=None,
-        )
-
-    casted._sync_one = _fake_sync_one
-
-    rows = engine.sync(progress_callback=lambda done, total: progress.append((done, total)))
-
-    assert len(rows) == 25
-    assert progress == [
-        (0, 25),
-        (3, 25),
-        (6, 25),
-        (9, 25),
-        (12, 25),
-        (15, 25),
-        (18, 25),
-        (21, 25),
-        (24, 25),
-        (25, 25),
-    ]
+    try:
+        engine.sync(apply=True)
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert "approved preview" in str(exc)
 
 
 def _page(
@@ -246,7 +210,10 @@ def _page(
         "Name": {"type": "title", "title": [{"plain_text": title}]}
     }
     if zotero_uri is not None:
-        properties["Zotero URI"] = {"type": "rich_text", "rich_text": [{"plain_text": zotero_uri}]}
+        properties["Zotero URI"] = {
+            "type": "rich_text",
+            "rich_text": [{"plain_text": zotero_uri}],
+        }
     return {
         "object": "page",
         "id": page_id,
@@ -267,8 +234,7 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
             raise RuntimeError("disk error")
 
     class _Notion:
-        def get_page_files(self, *_):
-            return []
+        get_page_property = staticmethod(NotionClient.get_page_property)
 
         def get_workspace_upload_limit_bytes(self):
             return None
@@ -283,14 +249,32 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
         def send_file_bytes(self, *_):
             return "upload-1"
 
-        def attach_file_upload_to_page(self, **_):
-            return None
+        def get_page(self, _page_id):
+            return page
+
+        def attach_file_upload_to_page(self, **kwargs):
+            return {
+                "id": "page-1",
+                "properties": {
+                    "pdf-id": {
+                        "id": "pdf-id",
+                        "type": "files",
+                        "files": [
+                            {
+                                "name": kwargs["filename"],
+                                "type": "file",
+                                "file": {"url": "https://files.notion.test/upload-1"},
+                            }
+                        ],
+                    }
+                },
+            }
 
     engine = SyncEngine.__new__(SyncEngine)
     casted: Any = engine
     casted.cfg = SimpleNamespace(
-        sync=SimpleNamespace(dry_run=False, log_level="INFO", report_dir=tmp_path),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
+        sync=SimpleNamespace(),
+        notion=SimpleNamespace(pdf_property_id="pdf-id"),
     )
     casted.state = _State()
     casted.notion = _Notion()
@@ -303,7 +287,22 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
         warning=lambda *args, **kwargs: None,
         error=lambda *args, **kwargs: None,
     )
-    casted._get_cached_hash = lambda _path: "dummy-hash"
+    casted._get_cached_hash = lambda path: sha256_file(Path(path))
+    casted._apply_writes = True
+    casted._approved_actions = None
+    casted._match_cache = None
+    casted._pdf_property_ref = "pdf-id"
+    page = {
+        "id": "page-1",
+        "properties": {
+            "pdf-id": {
+                "id": "pdf-id",
+                "type": "files",
+                "files": [],
+            }
+        },
+    }
+    casted._snapshot = NotionDataSourceSnapshot(pages_by_id={"page1": page})
     casted._resolve_match = lambda _item: MatchResult(
         Status.OK, "page-1", "https://notion.so/page-1", None
     )
@@ -312,7 +311,7 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
     row = engine._sync_one(_make_item())
     assert row.final_status == Status.STATE_SAVE_FAILED.value
     assert row.error_message is not None
-    assert "may re-upload" in row.error_message
+    assert "will not replace" in row.error_message
 
 
 def test_sync_one_marks_unchanged_when_remote_file_is_healthy(tmp_path: Path):
@@ -370,34 +369,6 @@ def test_sync_one_reuploads_when_remote_file_name_drifted(tmp_path: Path):
     assert notion.attach_calls == 1
 
 
-def test_sync_one_force_reuploads_even_when_remote_file_name_matches(tmp_path: Path):
-    pdf = _make_pdf(tmp_path)
-    record = StateRecord(
-        zotero_item_key="ABC123",
-        notion_page_id="page-1",
-        pdf_absolute_path=pdf.absolute_path,
-        pdf_size=pdf.size,
-        pdf_mtime_ns=pdf.mtime_ns,
-        pdf_sha256="dummy-hash",
-        last_sync_time="2026-03-18T00:00:00+00:00",
-        last_status=Status.OK.value,
-        last_error_code=None,
-    )
-    engine, notion = _make_engine(
-        tmp_path,
-        pdf=pdf,
-        remote_files=[{"name": Path(pdf.absolute_path).name}],
-        state_record=record,
-    )
-
-    row = engine._sync_one(_make_item(), force=True)
-
-    assert row.final_status == Status.OK.value
-    assert row.action_taken == "upload_attach:forced"
-    assert notion.create_calls == 1
-    assert notion.attach_calls == 1
-
-
 def test_sync_one_keeps_long_filename_items_unchanged_when_remote_name_is_truncated(
     tmp_path: Path,
 ):
@@ -418,7 +389,11 @@ def test_sync_one_keeps_long_filename_items_unchanged_when_remote_name_is_trunca
         tmp_path,
         pdf=pdf,
         remote_files=[
-            {"name": NotionClient.normalize_attachment_filename(Path(pdf.absolute_path).name)}
+            {
+                "name": NotionClient.normalize_attachment_filename(
+                    Path(pdf.absolute_path).name
+                )
+            }
         ],
         state_record=record,
     )
@@ -430,29 +405,148 @@ def test_sync_one_keeps_long_filename_items_unchanged_when_remote_name_is_trunca
     assert notion.create_calls == 0
 
 
-def test_sync_one_dry_run_reports_missing_remote_pdf(tmp_path: Path):
+def test_sync_one_preview_reports_missing_remote_pdf(tmp_path: Path):
     pdf = _make_pdf(tmp_path)
-    engine, _ = _make_engine(tmp_path, pdf=pdf, remote_files=[], dry_run=True)
+    engine, _ = _make_engine(tmp_path, pdf=pdf, remote_files=[], preview=True)
 
     row = engine._sync_one(_make_item())
 
     assert row.final_status == Status.OK.value
-    assert row.action_taken == "dry_run_upload:missing_remote_pdf"
+    assert row.action_taken == "preview_upload:missing_remote_pdf"
 
 
-def test_sync_one_dry_run_reports_multiple_remote_files_as_drift(tmp_path: Path):
+def test_sync_one_preview_reports_multiple_remote_files_as_drift(tmp_path: Path):
     pdf = _make_pdf(tmp_path)
     engine, _ = _make_engine(
         tmp_path,
         pdf=pdf,
         remote_files=[{"name": "a.pdf"}, {"name": "b.pdf"}],
-        dry_run=True,
+        preview=True,
     )
 
     row = engine._sync_one(_make_item())
 
+    assert row.final_status == "REMOTE_PDF_CONFLICT"
+    assert row.action_taken == "skip:remote_drift_multiple_files"
+
+
+def test_sync_one_conflicts_on_same_name_single_file_without_state(
+    tmp_path: Path,
+):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=[{"name": Path(pdf.absolute_path).name, "type": "file"}],
+        state_record=None,
+    )
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.REMOTE_PDF_CONFLICT.value
+    assert row.action_taken == "skip:remote_pdf_not_managed"
+    assert notion.create_calls == 0
+
+
+def test_sync_one_conflicts_on_unmanaged_mismatched_single_file(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=[{"name": "someone-elses.pdf", "type": "file"}],
+        state_record=None,
+    )
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == "REMOTE_PDF_CONFLICT"
+    assert row.action_taken == "skip:remote_pdf_not_managed"
+    assert notion.create_calls == 0
+
+
+def test_state_without_remote_identity_does_not_claim_a_remote_file(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    record = StateRecord(
+        "ABC123",
+        "page-1",
+        pdf.absolute_path,
+        pdf.size,
+        pdf.mtime_ns,
+        "dummy-hash",
+        "2026-03-18T00:00:00+00:00",
+        Status.OK.value,
+        None,
+    )
+    engine, notion = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=[{"name": Path(pdf.absolute_path).name}],
+        state_record=record,
+        preserve_missing_remote_identity=True,
+    )
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.REMOTE_PDF_CONFLICT.value
+    assert notion.create_calls == 0
+
+
+def test_remote_identity_change_is_a_conflict(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    record = StateRecord(
+        "ABC123",
+        "page-1",
+        pdf.absolute_path,
+        pdf.size,
+        pdf.mtime_ns,
+        "dummy-hash",
+        "2026-03-18T00:00:00+00:00",
+        Status.OK.value,
+        None,
+        Path(pdf.absolute_path).name,
+        "file",
+        "/previous-remote-object",
+    )
+    engine, notion = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=[{"name": Path(pdf.absolute_path).name}],
+        state_record=record,
+    )
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.REMOTE_PDF_CONFLICT.value
+    assert notion.create_calls == 0
+
+
+def test_successful_upload_records_the_remote_identity(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, _ = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+
+    row = engine._sync_one(_make_item())
+
     assert row.final_status == Status.OK.value
-    assert row.action_taken == "dry_run_upload:remote_drift_multiple_files"
+    saved = engine.state.saved
+    assert saved.remote_file_name == "sample.pdf"
+    assert saved.remote_file_type == "file"
+    assert saved.remote_file_identity == "/upload-1"
+
+
+def test_local_file_disappearing_during_upload_is_an_item_failure(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+
+    def disappear(*_args, **_kwargs):
+        Path(pdf.absolute_path).unlink()
+        raise OSError("file disappeared")
+
+    notion.send_file_bytes = disappear
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert "became unavailable" in (row.error_message or "")
 
 
 def test_sync_one_skips_files_above_workspace_limit(tmp_path: Path):
@@ -526,21 +620,17 @@ def test_doctor_reports_workspace_limit_and_group_libraries(tmp_path: Path):
     casted.cfg = SimpleNamespace(
         zotero=SimpleNamespace(
             data_dir=tmp_path / "zotero",
-            sqlite_path=tmp_path / "zotero" / "zotero.sqlite",
             storage_dir=tmp_path / "zotero" / "storage",
         ),
         sync=SimpleNamespace(
-            state_db_path=tmp_path / "state" / "sync-state.sqlite3",
-            report_dir=tmp_path / "reports",
+            state_db_path=tmp_path / "state" / "noteropdf.sqlite3",
             log_dir=tmp_path / "logs",
         ),
         notion=SimpleNamespace(
-            database_id="db-1",
-            data_source_id="",
-            pdf_property_name="PDF",
-            zotero_uri_property_name="Zotero URI",
+            data_source_id="ds-1",
+            pdf_property_id="pdf-id",
         ),
-        notion_token_source="env",
+        notion_token_source="keyring",
     )
     casted._logger = SimpleNamespace(
         debug=lambda *args, **kwargs: None,
@@ -551,260 +641,339 @@ def test_doctor_reports_workspace_limit_and_group_libraries(tmp_path: Path):
     casted.data_source_id = None
 
     casted.cfg.zotero.data_dir.mkdir(parents=True)
-    casted.cfg.zotero.sqlite_path.write_bytes(b"sqlite")
     casted.cfg.zotero.storage_dir.mkdir(parents=True)
 
     casted.zotero = SimpleNamespace(
-        list_parent_items=lambda: [1, 2],
-        count_group_parent_items=lambda: 3,
-        read_only_guarantees=lambda: {
-            "immutable_uri": True,
-            "readonly_guard": True,
-        },
+        list_parent_items=lambda: [
+            SimpleNamespace(notero_page_url="https://notion.so/page"),
+            SimpleNamespace(notero_page_url=None),
+        ],
     )
     casted.notion = SimpleNamespace(
         ping=lambda: None,
         get_workspace_upload_limit_bytes=lambda: 123456,
-        resolve_target_ids=lambda **_: ("db-1", "ds-1"),
+        resolve_property=lambda _ds, ref: SimpleNamespace(id=ref),
         validate_pdf_property=lambda *_: None,
-        has_property=lambda *_: True,
     )
 
     lines = engine.doctor()
 
-    assert any("Skipped group parent items: 3" in line for line in lines)
+    assert any("group libraries are not synced" in line for line in lines)
+    assert any("local read-only API" in line for line in lines)
     assert any("Notion workspace upload limit: 123456 bytes." in line for line in lines)
-    assert any("Notion data source was resolved: ds-1" in line for line in lines)
+    assert any("Notion data source is accessible: ds-1" in line for line in lines)
+
+    def fail_snapshot() -> list[object]:
+        raise RuntimeError("source unavailable")
+
+    casted.zotero.list_parent_items = fail_snapshot
+    with pytest.raises(RuntimeError, match="Zotero read-only snapshot check failed"):
+        engine.doctor()
 
 
 def test_resolve_match_ignores_trashed_primary_page():
+    page_id = "123456781234123412341234567890ab"
     item = ZoteroItem(
         item_id=1,
         key="ABC123",
-        library_id=1,
         title="Paper",
-        doi=None,
         zotero_uri="zotero://select/library/items/ABC123",
-        zotero_web_uri=None,
-        notero_page_url="https://www.notion.so/trashedpage",
+        notero_page_url=f"https://www.notion.so/{page_id}",
     )
 
     engine = SyncEngine.__new__(SyncEngine)
     casted: Any = engine
-    casted.cfg = SimpleNamespace(
-        notion=SimpleNamespace(
-            pdf_property_name="PDF",
-            zotero_uri_property_name="Zotero URI",
-            doi_property_name="DOI",
-        )
-    )
+    casted.cfg = SimpleNamespace(notion=SimpleNamespace(pdf_property_id="pdf-id"))
     casted.data_source_id = "ds"
-    casted.zotero = SimpleNamespace(extract_notero_page_id=lambda _item: "page-1")
-    casted.notion = SimpleNamespace(
-        get_page=lambda _page_id: {
-            "id": "page-1",
-            "url": "https://notion.so/page-1",
-            "in_trash": True,
-        },
-        has_property=lambda *_: False,
+    casted._snapshot = NotionDataSourceSnapshot(
+        pages_by_id={
+            page_id: {
+                "id": page_id,
+                "url": f"https://notion.so/{page_id}",
+                "in_trash": True,
+            }
+        }
     )
+    casted.notion = SimpleNamespace()
 
     match = engine._resolve_match(item)
 
     assert match.status == Status.NO_NOTION_MATCH
 
 
-def test_cleanup_preview_marks_missing_zotero_rows_stale_without_trashing():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="zotero://select/library/items/DEAD999")],
+def test_sync_one_skips_when_pdf_changed_since_preview(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    casted: Any = engine
+    casted._get_cached_hash = lambda path: sha256_file(Path(path))
+    Path(pdf.absolute_path).write_bytes(b"changed after preview")
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert row.action_taken == "skip:stale_preview"
+    assert notion.create_calls == 0
+
+
+def test_sync_one_skips_when_target_page_disappeared(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    casted: Any = engine
+    casted._get_cached_hash = lambda path: sha256_file(Path(path))
+    notion.get_page = lambda _page_id: None
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert "target Notion page" in (row.error_message or "")
+    assert notion.create_calls == 0
+
+
+def test_sync_one_only_applies_an_unchanged_approved_preview(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    casted: Any = engine
+    digest = sha256_file(Path(pdf.absolute_path))
+    casted._apply_writes = True
+    casted._approved_actions = {
+        "ABC123": PreviewAction(
+            zotero_item_key="ABC123",
+            notion_page_id="page-1",
+            pdf_absolute_path=pdf.absolute_path,
+            pdf_size=pdf.size,
+            pdf_mtime_ns=pdf.mtime_ns,
+            pdf_sha256=digest,
+        )
+    }
+    casted._get_cached_hash = lambda _path: digest
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.OK.value
+    assert notion.create_calls == 1
+
+
+def test_approved_action_cannot_be_satisfied_by_a_different_current_target(
+    tmp_path: Path,
+):
+    pdf = _make_pdf(tmp_path)
+    record = StateRecord(
+        zotero_item_key="ABC123",
+        notion_page_id="page-1",
+        pdf_absolute_path=pdf.absolute_path,
+        pdf_size=pdf.size,
+        pdf_mtime_ns=pdf.mtime_ns,
+        pdf_sha256=sha256_file(Path(pdf.absolute_path)),
+        last_sync_time="2026-08-09T00:00:00+00:00",
+        last_status=Status.OK.value,
+        last_error_code=None,
+    )
+    engine, notion = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=[{"name": Path(pdf.absolute_path).name, "type": "file"}],
+        state_record=record,
+    )
+    digest = sha256_file(Path(pdf.absolute_path))
+    engine._approved_actions = {
+        "ABC123": PreviewAction(
+            "ABC123",
+            "different-page",
+            pdf.absolute_path,
+            pdf.size,
+            pdf.mtime_ns,
+            digest,
+        )
+    }
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert notion.create_calls == 0
+
+
+def test_preview_action_records_remote_files_signature(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    remote_files = [{"name": "old.pdf", "type": "file"}]
+    record = StateRecord(
+        zotero_item_key="ABC123",
+        notion_page_id="page-1",
+        pdf_absolute_path=pdf.absolute_path,
+        pdf_size=pdf.size,
+        pdf_mtime_ns=pdf.mtime_ns,
+        pdf_sha256="dummy-hash",
+        last_sync_time="2026-03-18T00:00:00+00:00",
+        last_status=Status.OK.value,
+        last_error_code=None,
+    )
+    engine, _ = _make_engine(
+        tmp_path,
+        pdf=pdf,
+        remote_files=remote_files,
+        state_record=record,
+        preview=True,
     )
 
-    rows = engine.cleanup_deleted_pages(apply=False)
+    engine._sync_one(_make_item())
 
-    assert rows[0].final_status == Status.STALE_NOTION_ROW.value
-    assert rows[0].action_taken == "dry_run_trash:missing_from_zotero_library"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_apply_trashes_missing_zotero_rows():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="zotero://select/library/items/DEAD999")],
+    assert engine.preview_actions()[0].remote_files_signature == (
+        ("old.pdf", "file", "/remote-0"),
     )
 
-    rows = engine.cleanup_deleted_pages(apply=True)
 
-    assert rows[0].final_status == Status.STALE_NOTION_ROW.value
-    assert rows[0].action_taken == "trash:missing_from_zotero_library"
-    assert notion.trash_calls == ["page-1"]
+def test_apply_skips_when_remote_files_change_before_upload(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    digest = sha256_file(Path(pdf.absolute_path))
+    engine._approved_actions = {
+        "ABC123": PreviewAction(
+            "ABC123", "page-1", pdf.absolute_path, pdf.size, pdf.mtime_ns, digest, ()
+        )
+    }
+    engine._get_cached_hash = lambda _path: digest
+    notion.get_page = lambda _page_id: {
+        "id": "page-1",
+        "properties": {
+            "pdf-id": {
+                "id": "pdf-id",
+                "type": "files",
+                "files": [{"name": "new.pdf", "type": "file"}],
+            }
+        },
+    }
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert notion.create_calls == 0
 
 
-def test_cleanup_trashes_duplicate_when_canonical_page_exists():
-    canonical_page_id = "11111111-1111-1111-1111-111111111111"
-    duplicate_page_id = "22222222-2222-2222-2222-222222222222"
-    item = _make_item(notero_page_url=f"https://www.notion.so/{canonical_page_id}")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[
-            _page(canonical_page_id, zotero_uri=item.zotero_uri),
-            _page(duplicate_page_id, zotero_uri=item.zotero_uri),
-        ],
+def test_apply_checks_remote_files_again_immediately_before_attach(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    digest = sha256_file(Path(pdf.absolute_path))
+    engine._approved_actions = {
+        "ABC123": PreviewAction(
+            "ABC123", "page-1", pdf.absolute_path, pdf.size, pdf.mtime_ns, digest, ()
+        )
+    }
+    engine._get_cached_hash = lambda _path: digest
+    unchanged_page = engine._snapshot.get_page("page-1")
+    changed_page = {
+        "id": "page-1",
+        "properties": {
+            "pdf-id": {
+                "id": "pdf-id",
+                "type": "files",
+                "files": [{"name": "new.pdf", "type": "file"}],
+            }
+        },
+    }
+    fresh_pages = iter((unchanged_page, changed_page))
+    notion.get_page = lambda _page_id: next(fresh_pages)
+
+    row = engine._sync_one(_make_item())
+
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert notion.create_calls == 1
+    assert notion.attach_calls == 0
+
+
+def test_match_cache_rejects_multiple_items_for_one_page():
+    first = _make_item(key="FIRST")
+    second = _make_item(key="SECOND")
+    engine = SyncEngine.__new__(SyncEngine)
+    engine._resolve_match = lambda _item: MatchResult(
+        Status.OK, "same-page", "https://notion.so/same-page", None
     )
 
-    rows = engine.cleanup_deleted_pages(apply=True)
+    cache = engine._build_match_cache([first, second])
 
-    by_page = {row.notion_page_id: row for row in rows}
-    assert by_page[canonical_page_id].final_status == Status.UNCHANGED.value
-    assert by_page[duplicate_page_id].final_status == Status.STALE_NOTION_ROW.value
-    assert by_page[duplicate_page_id].action_taken == "trash:duplicate_of_canonical_notero_page"
-    assert notion.trash_calls == [duplicate_page_id]
+    assert cache[first.key].status == Status.MULTIPLE_NOTION_MATCHES
+    assert cache[second.key].status == Status.MULTIPLE_NOTION_MATCHES
 
 
-def test_cleanup_does_not_trash_live_row_when_canonical_page_is_not_active():
-    stale_canonical_page_id = "11111111-1111-1111-1111-111111111111"
-    active_page_id = "22222222-2222-2222-2222-222222222222"
-    item = _make_item(notero_page_url=f"https://www.notion.so/{stale_canonical_page_id}")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page(active_page_id, zotero_uri=item.zotero_uri)],
-    )
+def test_sync_one_skips_upload_not_in_approved_preview(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    casted: Any = engine
+    casted._apply_writes = True
+    casted._approved_actions = {}
+    row = engine._sync_one(_make_item())
 
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.AMBIGUOUS_CLEANUP_MATCH.value
-    assert rows[0].action_taken == "skip:stale_canonical_notero_page"
-    assert notion.trash_calls == []
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert row.action_taken == "skip:stale_preview"
+    assert notion.create_calls == 0
 
 
-def test_cleanup_marks_duplicate_live_rows_without_canonical_page_ambiguous():
-    item = _make_item(zotero_web_uri="https://zotero.org/user/items/ABC123")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[
-            _page("page-1", zotero_uri=item.zotero_uri),
-            _page("page-2", zotero_uri=item.zotero_web_uri),
-        ],
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert {row.final_status for row in rows} == {Status.AMBIGUOUS_CLEANUP_MATCH.value}
-    assert notion.trash_calls == []
-
-
-def test_cleanup_skips_group_library_uri_as_unmanaged():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="zotero://select/groups/42/items/DEAD999")],
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.UNMANAGED_NOTION_ROW.value
-    assert rows[0].action_taken == "skip:out_of_scope_zotero_uri"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_skips_other_user_web_uri_as_unmanaged():
-    item = _make_item(zotero_web_uri="https://zotero.org/diyanko/items/ABC123")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="https://zotero.org/someone/items/DEAD999")],
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.UNMANAGED_NOTION_ROW.value
-    assert rows[0].action_taken == "skip:out_of_scope_zotero_uri"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_matches_web_uris_case_insensitively():
-    item = _make_item(zotero_web_uri="https://zotero.org/Diyanko/items/ABC123")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="https://zotero.org/diyanko/items/ABC123")],
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.UNCHANGED.value
-    assert rows[0].action_taken == "keep:live_zotero_match"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_keeps_canonical_row_even_without_zotero_uri():
-    page_id = "33333333-3333-3333-3333-333333333333"
+def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: Path):
+    pdf = _make_pdf(tmp_path)
+    page_id = "11111111-1111-1111-1111-111111111111"
     item = _make_item(notero_page_url=f"https://www.notion.so/{page_id}")
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page(page_id, zotero_uri=None)],
+    page = {
+        "object": "page",
+        "id": page_id,
+        "url": f"https://www.notion.so/{page_id}",
+        "properties": {"pdf-id": {"id": "pdf-id", "type": "files", "files": []}},
+    }
+
+    class Zotero:
+        closed = False
+
+        def all_items(self):
+            return [item]
+
+        def select_candidate_pdf(self, _item):
+            return Status.OK.value, pdf, None
+
+        def close(self):
+            self.closed = True
+
+    class Notion:
+        normalize_attachment_filename = staticmethod(
+            NotionClient.normalize_attachment_filename
+        )
+
+        def resolve_property(self, _source, property_id):
+            return SimpleNamespace(id=property_id)
+
+        def validate_pdf_property(self, *_args):
+            return None
+
+        def build_data_source_snapshot(self, _source, **kwargs):
+            assert kwargs["pdf_property"] == "pdf-id"
+            return NotionDataSourceSnapshot(
+                pages_by_id={page_id.replace("-", ""): page},
+            )
+
+        def get_workspace_upload_limit_bytes(self):
+            return None
+
+    engine = SyncEngine.__new__(SyncEngine)
+    engine.cfg = SimpleNamespace(
+        notion=SimpleNamespace(
+            data_source_id="source",
+            pdf_property_id="pdf-id",
+        )
     )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.UNCHANGED.value
-    assert rows[0].action_taken == "keep:canonical_notero_page"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_marks_missing_uri_row_unmanaged_when_not_canonical():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri=None)],
+    engine.zotero = Zotero()
+    engine.notion = Notion()
+    engine.state = SimpleNamespace(get=lambda _key: None)
+    engine._logger = SimpleNamespace(
+        debug=lambda *_args, **_kwargs: None,
+        warning=lambda *_args, **_kwargs: None,
     )
+    engine.data_source_id = None
+    engine._snapshot = None
+    engine._pdf_property_ref = ""
+    engine._apply_writes = False
+    engine._preview_actions = {}
+    engine._approved_actions = None
+    engine._match_cache = None
+    engine._hash_cache = {}
 
-    rows = engine.cleanup_deleted_pages(apply=True)
+    rows = engine.sync()
 
-    assert rows[0].final_status == Status.UNMANAGED_NOTION_ROW.value
-    assert rows[0].action_taken == "skip:unmanaged_missing_zotero_uri"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_ignores_trashed_pages_returned_by_client():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="zotero://select/library/items/DEAD999", in_trash=True)],
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows == []
-    assert notion.trash_calls == []
-
-
-def test_cleanup_requires_zotero_uri_property():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri=item.zotero_uri)],
-        has_uri_property=False,
-    )
-
-    try:
-        engine.cleanup_deleted_pages(apply=True)
-        assert False, "Expected NotionApiError"
-    except NotionApiError as exc:
-        assert exc.code == "NOTION_SCHEMA_ERROR"
-    assert notion.trash_calls == []
-
-
-def test_cleanup_maps_trash_errors_to_status_code():
-    item = _make_item()
-    engine, notion = _make_cleanup_engine(
-        items=[item],
-        pages=[_page("page-1", zotero_uri="zotero://select/library/items/DEAD999")],
-        trash_error=NotionApiError("NOTION_RATE_LIMIT", "rate limited", 429),
-    )
-
-    rows = engine.cleanup_deleted_pages(apply=True)
-
-    assert rows[0].final_status == Status.NOTION_RATE_LIMIT.value
-    assert rows[0].action_taken == "trash:missing_from_zotero_library"
-    assert notion.trash_calls == ["page-1"]
+    assert engine.zotero is None
+    assert rows[0].action_taken == "preview_upload:missing_remote_pdf"
+    assert engine.preview_actions()[0].notion_page_id == page_id

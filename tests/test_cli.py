@@ -1,929 +1,439 @@
-import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from noteropdf.cli import _build_parser, _make_sync_progress_logger, main
-from noteropdf.logging_setup import _should_use_color, _UserConsoleFormatter
-from noteropdf.models import CleanupRow, SyncRow
-from noteropdf.notion_client import NotionApiError, NotionTarget
+import pytest
+
+from noteropdf import __version__
+from noteropdf.auth import NOTION_TOKEN_PAGE_URL
+from noteropdf.cli import (
+    _authorize_notion,
+    _build_parser,
+    _print_summary,
+    _run_connect,
+    _run_doctor,
+    _run_sync,
+    _select_pdf_property,
+    _select_target,
+    _select_zotero_directory,
+    main,
+)
+from noteropdf.models import SyncRow
+from noteropdf.notion_client import (
+    NotionApiError,
+    NotionProperty,
+    NotionTarget,
+)
+from noteropdf.settings import LocalSettings
+from noteropdf.sync_engine import PreviewAction
 
 
-SECRET_TOKEN = "secret_test_token_that_is_long_enough_12345"
-
-
-def test_console_formatter_keeps_default_output_plain():
-    formatter = _UserConsoleFormatter(use_color=False, verbose=False)
-    record = logging.LogRecord(
-        "noteropdf.cli", logging.INFO, __file__, 1, "[OK] Done", (), None
+def _row(action: str, status: str = "OK") -> SyncRow:
+    return SyncRow(
+        zotero_item_key="ABC",
+        title="Paper",
+        zotero_uri="zotero://select/library/items/ABC",
+        notion_page_id="page",
+        notion_page_url=None,
+        local_pdf_path="paper.pdf",
+        action_taken=action,
+        final_status=status,
+        error_message=None,
     )
 
-    assert formatter.format(record) == "[OK] Done"
 
-
-def test_console_formatter_colors_known_labels_when_enabled():
-    formatter = _UserConsoleFormatter(use_color=True, verbose=False)
-    record = logging.LogRecord(
-        "noteropdf.cli", logging.INFO, __file__, 1, "[ERROR] Problem", (), None
-    )
-
-    assert formatter.format(record).startswith("\033[31m[ERROR]\033[0m")
-
-
-def test_color_detection_respects_no_color_and_dumb_terminal(monkeypatch):
-    monkeypatch.setenv("NO_COLOR", "1")
-    assert _should_use_color(no_color=False) is False
-
-    monkeypatch.delenv("NO_COLOR")
-    monkeypatch.setenv("TERM", "dumb")
-    assert _should_use_color(no_color=False) is False
-
-    monkeypatch.setenv("TERM", "xterm-256color")
-    assert _should_use_color(no_color=True) is False
-
-
-def test_public_help_shows_general_user_commands_and_flags():
+def test_parser_has_small_public_surface_and_default_sync():
     parser = _build_parser()
+    assert parser.parse_args([]).command is None
+    assert parser.parse_args(["sync", "--apply"]).apply is True
+    assert parser.parse_args(["--verbose", "sync"]).verbose is True
+    assert parser.parse_args(["sync", "--verbose"]).verbose is True
+    assert parser.parse_args(["connect"]).command == "connect"
+    assert parser.parse_args(["doctor"]).command == "doctor"
     help_text = parser.format_help()
-
-    assert "{setup,doctor,sync,cleanup}" in help_text
-    assert "--verbose" in help_text
-    assert "--no-color" in help_text
-    assert "support-bundle" not in help_text
-    assert "rebuild-page-files" not in help_text
-    assert "full-reset" not in help_text
-    assert "--force" not in help_text
+    assert "{sync,connect,doctor}" in help_text
+    assert "cleanup" not in help_text
+    assert "setup" not in help_text
 
 
-def test_sync_force_flag_is_parsed():
-    parser = _build_parser()
+def test_parser_reports_package_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        _build_parser().parse_args(["--version"])
 
-    args = parser.parse_args(["sync", "--force"])
-
-    assert args.command == "sync"
-    assert args.force is True
-
-
-def test_cleanup_apply_yes_flags_are_parsed():
-    parser = _build_parser()
-
-    args = parser.parse_args(["cleanup", "--apply", "--yes"])
-
-    assert args.command == "cleanup"
-    assert args.apply is True
-    assert args.yes is True
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"noteropdf {__version__}\n"
 
 
-def test_global_output_flags_are_parsed_before_command():
-    parser = _build_parser()
-
-    args = parser.parse_args(["--verbose", "--no-color", "doctor"])
-
-    assert args.command == "doctor"
-    assert args.verbose is True
-    assert args.no_color is True
-
-
-def test_global_output_flags_are_parsed_after_command():
-    parser = _build_parser()
-
-    sync_args = parser.parse_args(["sync", "--verbose"])
-    cleanup_args = parser.parse_args(["cleanup", "--no-color"])
-
-    assert sync_args.command == "sync"
-    assert sync_args.verbose is True
-    assert cleanup_args.command == "cleanup"
-    assert cleanup_args.no_color is True
+def test_main_without_command_runs_sync(monkeypatch, tmp_path: Path):
+    calls = []
+    monkeypatch.setattr(
+        "noteropdf.cli._run_sync", lambda **kwargs: calls.append(kwargs) or 0
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
+    )
+    assert main([]) == 0
+    assert calls == [{"apply_without_prompt": False}]
 
 
-def test_sync_progress_logger_uses_short_plain_messages(caplog):
-    caplog.set_level(logging.INFO, logger="noteropdf.cli")
-    progress = _make_sync_progress_logger()
+def test_main_reports_generic_cancellation(monkeypatch, tmp_path: Path, caplog):
+    monkeypatch.setattr(
+        "noteropdf.cli._run_connect",
+        lambda: (_ for _ in ()).throw(EOFError()),
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
+    )
 
-    progress(0, 25)
-    progress(10, 25)
-    progress(25, 25)
+    assert main(["connect"]) == 130
+    assert "Any operation already completed remains in place" in caplog.text
+    assert "upload" not in caplog.text.casefold()
 
-    assert [record.message for record in caplog.records] == [
-        "[INFO] Sync progress: checking 25 Zotero items.",
-        "[INFO] Sync progress: checked 10 of 25 Zotero items.",
-        "[OK] Sync progress: checked all 25 Zotero items.",
+
+def test_print_summary_is_concise(capsys):
+    _print_summary(
+        [
+            _row("preview_upload:first_sync"),
+            _row("quick_fingerprint_match", "UNCHANGED"),
+        ],
+        preview=True,
+    )
+    output = capsys.readouterr().out
+    assert "Sync preview" in output
+    assert "PDFs to upload: 1" in output
+    assert "Already current: 1" in output
+
+
+def test_select_pdf_property_prefers_dedicated_property():
+    pdf = NotionProperty("pdf-id", "NoteroPDF PDF", "files")
+    notion = SimpleNamespace(find_files_property=lambda _id, _name: pdf)
+    selected = _select_pdf_property(notion, NotionTarget("source", "Library"))
+    assert selected == pdf
+
+
+def test_select_pdf_property_reuses_renamed_connected_property():
+    renamed = NotionProperty("pdf-id", "Renamed PDF", "files")
+
+    class Notion:
+        @staticmethod
+        def resolve_property(_data_source_id, property_id):
+            assert property_id == "pdf-id"
+            return renamed
+
+        @staticmethod
+        def find_files_property(*_args):
+            pytest.fail("the saved property ID should be reused")
+
+    selected = _select_pdf_property(
+        Notion(),
+        NotionTarget("source", "Library"),
+        LocalSettings(notion_data_source_id="source", pdf_property_id="pdf-id"),
+    )
+
+    assert selected == renamed
+
+
+def test_duplicate_database_names_are_displayed_with_unique_context(monkeypatch):
+    choices = []
+    notion = SimpleNamespace(
+        list_accessible_data_sources=lambda: [
+            NotionTarget("source-one", "Library", "https://notion.so/one"),
+            NotionTarget("source-two", "Library", "https://notion.so/two"),
+        ]
+    )
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr(
+        "noteropdf.cli._choose_number",
+        lambda _prompt, labels: choices.extend(labels) or 1,
+    )
+
+    selected = _select_target(notion)
+
+    assert selected.data_source_id == "source-two"
+    assert choices == [
+        "Library — https://notion.so/one",
+        "Library — https://notion.so/two",
     ]
 
 
-def test_setup_command_is_parsed():
-    parser = _build_parser()
-    args = parser.parse_args(["setup", "--yes"])
-    assert args.command == "setup"
-    assert args.yes is True
-
-
-def test_setup_writes_config_and_env(monkeypatch, tmp_path: Path):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "yes",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return [
-                NotionTarget(
-                    data_source_id="cc60e681-3c44-83c3-a31e-878c0824d6ac",
-                    label="Research Library",
-                    database_id="3180e681-3c44-8198-9a97-e4532809e30e",
-                    url="https://www.notion.so/3180e6813c4481989a97e4532809e30e",
-                )
-            ]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-    assert code == 0
-    assert cfg_path.exists()
-    assert env_path.exists()
-
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    env_text = env_path.read_text(encoding="utf-8")
-    assert "database_id: 3180e681-3c44-8198-9a97-e4532809e30e" in cfg_text
-    assert "data_source_id: cc60e681-3c44-83c3-a31e-878c0824d6ac" in cfg_text
-    assert "token_env: NOTION_TOKEN" in cfg_text
-    assert "sqlite_path" not in cfg_text
-    assert "storage_dir" not in cfg_text
-    assert f"NOTION_TOKEN={SECRET_TOKEN}" in env_text
-
-
-def test_setup_handles_multiple_discovered_data_sources(monkeypatch, tmp_path: Path):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "9",
-            "abc",
-            "2",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return [
-                NotionTarget(
-                    data_source_id="cc60e681-3c44-83c3-a31e-878c0824d6ac",
-                    label="Alpha",
-                    database_id="3180e681-3c44-8198-9a97-e4532809e30e",
-                    url=None,
-                ),
-                NotionTarget(
-                    data_source_id="dd70e681-3c44-83c3-a31e-878c0824d6ad",
-                    label="Beta",
-                    database_id="4180e681-3c44-8198-9a97-e4532809e30f",
-                    url=None,
-                ),
-            ]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    assert "database_id: 4180e681-3c44-8198-9a97-e4532809e30f" in cfg_text
-    assert "data_source_id: dd70e681-3c44-83c3-a31e-878c0824d6ad" in cfg_text
-
-
-def test_setup_allows_manual_override_when_single_target_is_discovered(
-    monkeypatch, tmp_path: Path
-):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "no",
-            "https://www.notion.so/4180e6813c4481989a97e4532809e30f",
-            "",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return [
-                NotionTarget(
-                    data_source_id="cc60e681-3c44-83c3-a31e-878c0824d6ac",
-                    label="Auto Pick",
-                    database_id="3180e681-3c44-8198-9a97-e4532809e30e",
-                    url=None,
-                )
-            ]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    assert "database_id: 4180e681-3c44-8198-9a97-e4532809e30f" in cfg_text
-    assert "data_source_id: ''" in cfg_text
-
-
-def test_setup_falls_back_to_manual_target_entry_when_discovery_returns_none(
-    monkeypatch, tmp_path: Path
-):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "https://www.notion.so/3180e6813c4481989a97e4532809e30e",
-            "",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    assert "database_id: 3180e681-3c44-8198-9a97-e4532809e30e" in cfg_text
-
-
-def test_setup_accepts_collection_url_in_database_prompt(monkeypatch, tmp_path: Path):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "collection://cc60e681-3c44-83c3-a31e-878c0824d6ac",
-            "",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    assert "database_id: ''" in cfg_text
-    assert "data_source_id: cc60e681-3c44-83c3-a31e-878c0824d6ac" in cfg_text
-
-
-def test_setup_falls_back_to_manual_target_entry_on_discovery_error(
-    monkeypatch, tmp_path: Path
-):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "",
-            "cc60e681-3c44-83c3-a31e-878c0824d6ac",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            raise NotionApiError("NOTION_API_ERROR", "search failed")
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    cfg_text = cfg_path.read_text(encoding="utf-8")
-    assert "data_source_id: cc60e681-3c44-83c3-a31e-878c0824d6ac" in cfg_text
-
-
-def test_setup_cancelled_when_existing_config_is_not_overwritten(
-    monkeypatch, tmp_path: Path
-):
-    cfg_path = tmp_path / "config.yaml"
-    cfg_path.write_text("existing: true\n", encoding="utf-8")
-    monkeypatch.setattr("builtins.input", lambda *_: "no")
-
-    code = main(["--config", str(cfg_path), "setup"])
-
-    assert code == 2
-    assert cfg_path.read_text(encoding="utf-8") == "existing: true\n"
-
-
-def test_setup_replaces_existing_env_token_instead_of_appending_duplicate(
-    monkeypatch, tmp_path: Path
-):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    env_path.write_text(
-        "NOTION_TOKEN=old_value\nOTHER_VAR=keep_me\n",
-        encoding="utf-8",
-    )
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "https://www.notion.so/3180e6813c4481989a97e4532809e30e",
-            "",
-            "",
-            "",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: False)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    env_text = env_path.read_text(encoding="utf-8")
-    assert env_text.count("NOTION_TOKEN=") == 1
-    assert f"NOTION_TOKEN={SECRET_TOKEN}" in env_text
-    assert "OTHER_VAR=keep_me" in env_text
-
-
-def test_setup_uses_keyring_when_available(monkeypatch, tmp_path: Path):
-    cfg_path = tmp_path / "config.yaml"
-    env_path = tmp_path / ".env"
-    data_dir = tmp_path / "Zotero"
-
-    answers = iter(
-        [
-            str(data_dir),
-            "",
-            "https://www.notion.so/3180e6813c4481989a97e4532809e30e",
-            "",
-            "",
-            "",
-            "yes",
-            "yes",
-        ]
-    )
-
-    class FakeNotionClient:
-        def __init__(self, *args, **kwargs):
-            return None
-
-        def list_accessible_data_sources(self):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr("builtins.input", lambda *_: next(answers))
-    monkeypatch.setattr("noteropdf.cli.getpass.getpass", lambda *_: SECRET_TOKEN)
-    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: data_dir)
-    monkeypatch.setattr("noteropdf.cli.keyring_available", lambda: True)
-    monkeypatch.setattr("noteropdf.cli.store_token_in_keyring", lambda *_: True)
-    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotionClient)
-
-    code = main(["--config", str(cfg_path), "--env", str(env_path), "setup", "--yes"])
-
-    assert code == 0
-    assert cfg_path.exists()
-    assert not env_path.exists()
-
-
-def test_doctor_command_runs_and_returns_zero(monkeypatch):
-    init_kwargs: dict[str, object] = {}
-
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-            init_kwargs.update(kwargs)
-
-        def doctor(self):
-            return ["ok"]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    calls: dict[str, object] = {}
-
-    def _fake_load_config(
-        config_path, env_path, *, allow_default_config_fallback=False
-    ):
-        calls["env_path"] = env_path
-        calls["allow_default_config_fallback"] = allow_default_config_fallback
-        return cfg
-
-    monkeypatch.setattr("noteropdf.cli.load_config", _fake_load_config)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-
-    code = main(["doctor"])
-    assert code == 0
-    assert calls["env_path"] is None
-    assert calls["allow_default_config_fallback"] is True
-    assert init_kwargs == {"open_state": False, "acquire_lock": False}
-
-
-def test_doctor_command_treats_explicit_config_flag_as_explicit_path(monkeypatch):
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-
-        def doctor(self):
-            return ["ok"]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    calls: dict[str, object] = {}
-
-    def _fake_load_config(
-        config_path, env_path, *, allow_default_config_fallback=False
-    ):
-        calls["allow_default_config_fallback"] = allow_default_config_fallback
-        return cfg
-
-    monkeypatch.setattr("noteropdf.cli.load_config", _fake_load_config)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-
-    code = main(["--config", "config.yaml", "doctor"])
-
-    assert code == 0
-    assert calls["allow_default_config_fallback"] is False
-
-
-def test_sync_command_runs_with_preflight_and_reports(monkeypatch):
-    init_kwargs: dict[str, object] = {}
-
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-            init_kwargs.update(kwargs)
-
-        def estimate_parent_item_count(self):
-            return 5
-
-        def sync(self, *, force=False, progress_callback=None):
-            assert force is False
-            assert progress_callback is not None
-            return [
-                SyncRow(
-                    zotero_item_key="A",
-                    title="Paper",
-                    zotero_uri="zotero://select/library/items/A",
-                    notion_page_id="page-1",
-                    notion_page_url="https://notion.so/page-1",
-                    local_pdf_path="/tmp/a.pdf",
-                    action_taken="upload_attach:first_sync",
-                    final_status="OK",
-                    error_message=None,
-                )
-            ]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
-    monkeypatch.setattr(
-        "noteropdf.cli.write_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
-    )
-
-    code = main(["sync"])
-    assert code == 0
-    assert init_kwargs == {"open_state": True, "acquire_lock": True}
-
-
-def test_sync_command_passes_force_to_engine(monkeypatch):
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-
-        def estimate_parent_item_count(self):
-            return 2
-
-        def sync(self, *, force=False, progress_callback=None):
-            assert force is True
-            return []
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
-    monkeypatch.setattr(
-        "noteropdf.cli.write_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
-    )
-
-    code = main(["sync", "--force"])
-
-    assert code == 0
-
-
-def test_cleanup_preview_runs_without_trashing(monkeypatch):
-    calls: list[bool] = []
-    init_kwargs: dict[str, object] = {}
-
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-            init_kwargs.update(kwargs)
-
-        def estimate_parent_item_count(self):
-            return 2
-
-        def cleanup_deleted_pages(self, *, apply=False):
-            calls.append(apply)
-            return [
-                CleanupRow(
-                    notion_page_id="page-1",
-                    notion_page_url="https://notion.so/page-1",
-                    title="Old Paper",
-                    zotero_uri="zotero://select/library/items/OLD",
-                    action_taken="dry_run_trash:missing_from_zotero_library",
-                    final_status="STALE_NOTION_ROW",
-                    error_message=None,
-                )
-            ]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
-    monkeypatch.setattr(
-        "noteropdf.cli.write_cleanup_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
-    )
-
-    code = main(["cleanup"])
-
-    assert code == 0
-    assert calls == [False]
-    assert init_kwargs == {"open_state": False, "acquire_lock": False}
-
-
-def test_cleanup_apply_requires_confirmation_and_can_cancel(monkeypatch):
-    calls: list[bool] = []
-
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-
-        def estimate_parent_item_count(self):
-            return 2
-
-        def cleanup_deleted_pages(self, *, apply=False):
-            calls.append(apply)
-            return [
-                CleanupRow(
-                    notion_page_id="page-1",
-                    notion_page_url="https://notion.so/page-1",
-                    title="Old Paper",
-                    zotero_uri="zotero://select/library/items/OLD",
-                    action_taken="dry_run_trash:missing_from_zotero_library",
-                    final_status="STALE_NOTION_ROW",
-                    error_message=None,
-                )
-            ]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
+def test_connect_can_change_a_valid_saved_zotero_folder(monkeypatch, tmp_path: Path):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    for directory in (old, new):
+        directory.mkdir()
+        (directory / "zotero.sqlite").touch()
+        (directory / "storage").mkdir()
+    prompts = iter((False,))
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda *_: "no")
     monkeypatch.setattr(
-        "noteropdf.cli.write_cleanup_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
+        "noteropdf.cli._prompt_yes_no", lambda *_args, **_kwargs: next(prompts)
     )
+    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: new)
 
-    code = main(["cleanup", "--apply"])
-
-    assert code == 0
-    assert calls == [False]
+    assert _select_zotero_directory(LocalSettings(zotero_data_dir=old)) == new.resolve()
 
 
-def test_cleanup_apply_confirmed_trashes_after_preview(monkeypatch):
-    calls: list[bool] = []
-
-    class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-
-        def estimate_parent_item_count(self):
-            return 2
-
-        def cleanup_deleted_pages(self, *, apply=False):
-            calls.append(apply)
-            action = (
-                "trash:missing_from_zotero_library"
-                if apply
-                else "dry_run_trash:missing_from_zotero_library"
-            )
-            return [
-                CleanupRow(
-                    notion_page_id="page-1",
-                    notion_page_url="https://notion.so/page-1",
-                    title="Old Paper",
-                    zotero_uri="zotero://select/library/items/OLD",
-                    action_taken=action,
-                    final_status="STALE_NOTION_ROW",
-                    error_message=None,
-                )
-            ]
-
-        def close(self):
-            return None
-
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
-    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
+def test_rejected_saved_zotero_folder_is_not_auto_selected(monkeypatch, tmp_path: Path):
+    saved = tmp_path / "saved"
+    replacement = tmp_path / "replacement"
+    for directory in (saved, replacement):
+        directory.mkdir()
+        (directory / "zotero.sqlite").touch()
+        (directory / "storage").mkdir()
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda *_: "yes")
+    monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: saved)
     monkeypatch.setattr(
-        "noteropdf.cli.write_cleanup_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
+        "noteropdf.cli._prompt_value",
+        lambda _prompt, **_kwargs: str(replacement),
     )
 
-    code = main(["cleanup", "--apply"])
+    selected = _select_zotero_directory(LocalSettings(zotero_data_dir=saved))
 
-    assert code == 0
-    assert calls == [False, True]
+    assert selected == replacement.resolve()
 
 
-def test_cleanup_apply_yes_skips_confirmation(monkeypatch):
-    calls: list[bool] = []
-    init_kwargs: dict[str, object] = {}
+def test_interactive_sync_applies_only_actions_from_preview(monkeypatch):
+    preview_row = _row("preview_upload:first_sync")
+    result_row = _row("upload_attach:first_sync")
+    approved = (PreviewAction("ABC", "page", "paper.pdf", 10, 20, "digest"),)
+    calls = []
 
     class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
-            init_kwargs.update(kwargs)
+        def __init__(self, _cfg):
+            self.index = len(calls)
+            calls.append(self)
 
-        def estimate_parent_item_count(self):
-            return 2
+        def sync(self, **kwargs):
+            self.kwargs = kwargs
+            return [preview_row] if self.index == 0 else [result_row]
 
-        def cleanup_deleted_pages(self, *, apply=False):
-            calls.append(apply)
-            return []
+        def preview_actions(self):
+            return approved
 
         def close(self):
-            return None
+            pass
 
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
-    monkeypatch.setattr(
-        "noteropdf.cli.write_cleanup_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
-    )
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *args, **kwargs: True)
 
-    code = main(["cleanup", "--apply", "--yes"])
-
-    assert code == 0
-    assert calls == [True]
-    assert init_kwargs == {"open_state": False, "acquire_lock": True}
+    assert _run_sync(apply_without_prompt=False) == 0
+    assert calls[0].kwargs == {"apply": False}
+    assert calls[1].kwargs == {
+        "apply": True,
+        "approved_actions": approved,
+    }
 
 
-def test_cleanup_apply_without_yes_exits_in_non_interactive_shell(monkeypatch):
-    calls: list[bool] = []
+def test_noninteractive_sync_is_preview_only_without_apply(monkeypatch):
+    engines = []
 
     class FakeEngine:
-        def __init__(self, cfg, *args, **kwargs):
-            self.cfg = cfg
+        def __init__(self, _cfg):
+            engines.append(self)
 
-        def estimate_parent_item_count(self):
-            return 2
+        def sync(self, **kwargs):
+            return [_row("preview_upload:first_sync")]
 
-        def cleanup_deleted_pages(self, *, apply=False):
-            calls.append(apply)
-            return [
-                CleanupRow(
-                    notion_page_id="page-1",
-                    notion_page_url="https://notion.so/page-1",
-                    title="Old Paper",
-                    zotero_uri="zotero://select/library/items/OLD",
-                    action_taken="dry_run_trash:missing_from_zotero_library",
-                    final_status="STALE_NOTION_ROW",
-                    error_message=None,
-                )
-            ]
+        def preview_actions(self):
+            return (PreviewAction("ABC", "page", "paper.pdf", 10, 20, "digest"),)
 
         def close(self):
-            return None
+            pass
 
-    cfg = SimpleNamespace(
-        sync=SimpleNamespace(
-            log_dir=Path("."), log_level="INFO", report_dir=Path("."), dry_run=False
-        ),
-        notion=SimpleNamespace(pdf_property_name="PDF"),
-    )
-    monkeypatch.setattr("noteropdf.cli.load_config", lambda *_, **__: cfg)
-    monkeypatch.setattr("noteropdf.cli.setup_run_logging", lambda *_: Path("log.txt"))
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
-    monkeypatch.setattr("noteropdf.cli.zotero_maybe_open", lambda: False)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
+
+    assert _run_sync(apply_without_prompt=False) == 2
+    assert len(engines) == 1
+
+
+def test_apply_returns_failure_when_an_upload_was_not_completed(monkeypatch):
+    engines = []
+
+    class FakeEngine:
+        def __init__(self, _cfg):
+            self.index = len(engines)
+            engines.append(self)
+
+        def sync(self, **_kwargs):
+            if self.index == 0:
+                return [_row("preview_upload:first_sync")]
+            return [_row("upload_failed", "UPLOAD_FAILED")]
+
+        def preview_actions(self):
+            return (PreviewAction("ABC", "page", "paper.pdf", 10, 20, "digest"),)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
+
+    assert _run_sync(apply_without_prompt=True) == 1
+
+
+def test_preview_returns_failure_when_only_action_is_blocked(monkeypatch):
+    blocked = _row("skip:remote_pdf_not_managed", "REMOTE_PDF_CONFLICT")
+
+    class FakeEngine:
+        def __init__(self, _cfg):
+            pass
+
+        def sync(self, **_kwargs):
+            return [blocked]
+
+        def preview_actions(self):
+            return ()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
+
+    assert _run_sync(apply_without_prompt=False) == 1
+
+
+def test_doctor_reports_incomplete_setup_without_requiring_config(monkeypatch, capsys):
+    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: None)
+    monkeypatch.setattr("noteropdf.cli._credential_store", lambda: object())
     monkeypatch.setattr(
-        "noteropdf.cli.write_cleanup_reports",
-        lambda *_: (Path("a.json"), Path("a.csv"), Path("a-summary.json")),
+        "noteropdf.cli.resolve_access_token", lambda _store: ("", "missing")
     )
 
-    code = main(["cleanup", "--apply"])
-
-    assert code == 2
-    assert calls == [False]
-
-
-def test_main_rejects_python_below_supported_range(monkeypatch):
-    monkeypatch.setattr("sys.version_info", (3, 10, 12, "final", 0))
-
-    code = main(["doctor"])
-
-    assert code == 2
+    assert _run_doctor() == 2
+    output = capsys.readouterr().out
+    assert "Zotero data folder was not found" in output
+    assert "Notion personal access token has not been saved" in output
+    assert "noteropdf connect" in output
 
 
-def test_main_rejects_python_above_supported_range(monkeypatch):
-    monkeypatch.setattr("sys.version_info", (3, 14, 0, "final", 0))
+def test_authorize_notion_opens_pat_page_and_returns_new_token(monkeypatch, capsys):
+    opened = []
+    monkeypatch.setattr(
+        "noteropdf.cli.webbrowser.open",
+        lambda url, new: opened.append((url, new)) or True,
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli._prompt_notion_token", lambda: "new-personal-token"
+    )
 
-    code = main(["doctor"])
+    assert _authorize_notion(None) == ("new-personal-token", "new-personal-token")
+    assert opened == [(NOTION_TOKEN_PAGE_URL, 2)]
+    assert NOTION_TOKEN_PAGE_URL in capsys.readouterr().out
 
-    assert code == 2
+
+def test_authorize_notion_can_reuse_saved_token(monkeypatch):
+    monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        "noteropdf.cli.webbrowser.open",
+        lambda *args, **kwargs: pytest.fail("browser should not open"),
+    )
+
+    assert _authorize_notion("saved-token") == ("saved-token", None)
+
+
+def test_validated_token_is_saved_before_database_selection(
+    monkeypatch, tmp_path: Path
+):
+    previous = "old-personal-token"
+    replacement = "new-personal-token"
+    saved = []
+
+    class FakeStore:
+        def load(self):
+            return previous
+
+        def save(self, credentials):
+            saved.append(credentials)
+            return "keyring"
+
+    class FakeNotion:
+        def __init__(self, **_kwargs):
+            pass
+
+        def ping(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr(
+        "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
+    )
+    monkeypatch.setattr("noteropdf.cli._credential_store", FakeStore)
+    monkeypatch.setattr(
+        "noteropdf.cli._authorize_notion",
+        lambda _previous: (replacement, replacement),
+    )
+    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotion)
+    monkeypatch.setattr(
+        "noteropdf.cli._select_target",
+        lambda _notion: (_ for _ in ()).throw(ValueError("selection cancelled")),
+    )
+
+    with pytest.raises(ValueError, match="selection cancelled"):
+        _run_connect()
+
+    assert saved == [replacement]
+
+
+def test_connect_replaces_a_rejected_saved_token_in_one_run(
+    monkeypatch, tmp_path: Path
+):
+    saved = []
+    authorize_calls = []
+
+    class Store:
+        def load(self):
+            return "expired-token"
+
+        def save(self, token):
+            saved.append(token)
+
+    class FakeNotion:
+        def __init__(self, *, token, **_kwargs):
+            self.token = token
+
+        def ping(self):
+            if self.token == "expired-token":
+                raise NotionApiError("NOTION_AUTH_ERROR", "expired", 401)
+
+        def close(self):
+            pass
+
+    def authorize(previous):
+        authorize_calls.append(previous)
+        if previous is not None:
+            return previous, None
+        return "replacement-token", "replacement-token"
+
+    pdf = NotionProperty("pdf-id", "NoteroPDF PDF", "files")
+    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr(
+        "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
+    )
+    monkeypatch.setattr("noteropdf.cli._credential_store", Store)
+    monkeypatch.setattr("noteropdf.cli._authorize_notion", authorize)
+    monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotion)
+    monkeypatch.setattr(
+        "noteropdf.cli._select_target",
+        lambda _notion: NotionTarget("source", "Library"),
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli._select_pdf_property",
+        lambda _notion, _target, _existing: pdf,
+    )
+    monkeypatch.setattr("noteropdf.cli._save_connection", lambda _settings: None)
+
+    assert _run_connect() == 0
+    assert authorize_calls == ["expired-token", None]
+    assert saved == ["replacement-token"]
