@@ -36,6 +36,7 @@ from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionT
 from .profiles import connect_command as _connect_command
 from .profiles import normalize_profile, recovery_guidance, validate_profile_name
 from .settings import LocalSettings, save_settings
+from .source_engine import SourceFilesEngine, source_files_config
 from .state_store import StateStore
 from .status import Status
 from .sync_engine import SyncEngine
@@ -112,7 +113,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_profile_flag(parser)
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{sync,connect,doctor,pdf}",
+        metavar="{sync,sources,connect,doctor,pdf}",
     )
 
     sync = sub.add_parser(
@@ -147,6 +148,35 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="KEY",
         help="Include this parent item; repeat for more items",
+    )
+    sources = sub.add_parser(
+        "sources", help="Preview and upload supporting files for selected papers"
+    )
+    _add_output_flags(sources, suppress_defaults=True)
+    _add_profile_flag(sources, suppress_defaults=True)
+    sources.add_argument(
+        "--details",
+        action="store_true",
+        help="Show every selected supporting file and its outcome",
+    )
+    sources.add_argument(
+        "--item-key",
+        action="append",
+        type=validate_zotero_key,
+        required=True,
+        metavar="KEY",
+        help="Parent item to include; repeat for more papers",
+    )
+    sources.add_argument(
+        "--files-property",
+        default="Source files",
+        metavar="NAME",
+        help="Existing dedicated Notion files property (default: Source files)",
+    )
+    sources.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply the preview without an interactive confirmation",
     )
     connect = sub.add_parser(
         "connect",
@@ -798,6 +828,59 @@ def _run_doctor(profile: str | None = None) -> int:
     return 0
 
 
+def _run_sources(
+    *, item_keys: tuple[str, ...], property_name: str, apply_without_prompt: bool
+) -> int:
+    cfg = source_files_config(_load_ready_config(), property_name)
+    engine = SourceFilesEngine(cfg, item_keys=item_keys)
+    try:
+        preview = engine.sync(apply=False)
+        approved = engine.preview_actions()
+    finally:
+        engine.close()
+    pending = len(approved)
+    print("Supporting files preview")
+    print(f"- Files to upload: {pending}")
+    for action in approved[:20]:
+        print(f"  Add or update {action.zotero_item_key} ({action.pdf_size} bytes)")
+    if pending > 20:
+        print(f"  ... and {pending - 20} more files")
+    blockers = _blocking_issue_count(preview)
+    print(f"- Issues needing attention: {blockers}")
+    for row in preview:
+        if row.error_message:
+            print(f"- {row.zotero_item_key}: {row.error_message}")
+    if not pending:
+        return 1 if blockers else 0
+    should_apply = apply_without_prompt
+    if not should_apply and _stdin_interactive():
+        should_apply = _prompt_yes_no(
+            f"Upload {pending} supporting files to Notion now?", default_yes=False
+        )
+    if not should_apply:
+        print("[NEXT] Preview only. Repeat the same selection with --apply to upload.")
+        return (1 if blockers else 2) if not _stdin_interactive() else 0
+    apply_cfg = source_files_config(_load_ready_config(), property_name)
+    if apply_cfg != cfg:
+        print("[WARN] The connection changed after preview. Run the preview again.")
+        return 1
+    engine = SourceFilesEngine(apply_cfg, item_keys=item_keys)
+    try:
+        result = engine.sync(apply=True, approved_actions=approved)
+    finally:
+        engine.close()
+    completed = {
+        row.zotero_item_key for row in result if row.final_status in {"OK", "UNCHANGED"}
+    }
+    failed = len({action.zotero_item_key for action in approved} - completed)
+    result_blockers = _blocking_issue_count(result)
+    print(
+        f"- Files uploaded: {sum(row.action_taken.startswith('upload_attach:') for row in result)}"
+    )
+    print(f"- Issues needing attention: {max(failed, result_blockers)}")
+    return 1 if failed or result_blockers or blockers else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -846,6 +929,12 @@ def main(argv: list[str] | None = None) -> int:
                     item_keys=tuple(getattr(args, "item_key", ())),
                 ),
                 profile=profile,
+            )
+        if command == "sources":
+            return _run_sources(
+                item_keys=tuple(args.item_key),
+                property_name=args.files_property,
+                apply_without_prompt=args.apply,
             )
         parser.error(f"unknown command: {command}")
         return 2

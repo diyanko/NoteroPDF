@@ -110,6 +110,15 @@ class CandidatePdf:
     attachment_key: str = ""
 
 
+@dataclass(frozen=True)
+class SourceFile:
+    attachment_key: str
+    absolute_path: str
+    content_type: str
+    size: int
+    mtime_ns: int
+
+
 @dataclass
 class SyncRow:
     zotero_item_key: str

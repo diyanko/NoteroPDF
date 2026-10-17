@@ -11,6 +11,7 @@ from noteropdf.cli import (
     _print_summary,
     _run_connect,
     _run_doctor,
+    _run_sources,
     _run_sync,
     _select_pdf_property,
     _select_target,
@@ -51,7 +52,7 @@ def test_parser_has_small_public_surface_and_default_sync():
     assert parser.parse_args(["connect"]).command == "connect"
     assert parser.parse_args(["doctor"]).command == "doctor"
     help_text = parser.format_help()
-    assert "{sync,connect,doctor,pdf}" in help_text
+    assert "{sync,sources,connect,doctor,pdf}" in help_text
     assert "cleanup" not in help_text
     assert "setup" not in help_text
 
@@ -845,3 +846,59 @@ def test_sync_routes_details_with_named_profile_and_scope(
             "scope": SyncScope(item_keys=("ABCD1234",)),
         }
     ]
+
+
+def test_sources_parser_requires_explicit_valid_items():
+    parser = _build_parser()
+    for args in [["sources"], ["sources", "--item-key", "bad"]]:
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(args)
+        assert exc.value.code == 2
+    args = parser.parse_args(
+        ["sources", "--item-key", "PARENT01", "--item-key", "PARENT02"]
+    )
+    assert args.item_key == ["PARENT01", "PARENT02"]
+
+
+@pytest.mark.parametrize("apply_now", [False, True])
+def test_sources_reuses_exact_scope_and_approval(monkeypatch, apply_now):
+    cfg = object()
+    instances = []
+    approved = (PreviewAction("PARENT01:ATT00001", "page", "file.csv", 4, 5, "digest"),)
+
+    class Engine:
+        def __init__(self, config, *, item_keys):
+            assert config is cfg
+            assert item_keys == ("PARENT01",)
+            instances.append(self)
+
+        def sync(self, **kwargs):
+            self.kwargs = kwargs
+            row = _row(
+                "upload_attach:source_file"
+                if kwargs["apply"]
+                else "preview_upload:source_file"
+            )
+            row.zotero_item_key = approved[0].zotero_item_key
+            return [row]
+
+        def preview_actions(self):
+            return approved
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr(
+        "noteropdf.cli.source_files_config", lambda config, name: config
+    )
+    monkeypatch.setattr("noteropdf.cli.SourceFilesEngine", Engine)
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
+    assert _run_sources(
+        item_keys=("PARENT01",),
+        property_name="Source files",
+        apply_without_prompt=apply_now,
+    ) == (0 if apply_now else 2)
+    assert len(instances) == (2 if apply_now else 1)
+    if apply_now:
+        assert instances[1].kwargs == {"apply": True, "approved_actions": approved}

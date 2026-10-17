@@ -24,6 +24,15 @@ def _canonical_id(value: str, *, encoded: bool = False) -> str:
         return value
 
 
+def destination_key(data_source_id: str, property_id: str) -> str:
+    """Return a canonical, non-secret identity for one files destination."""
+    identity = json.dumps(
+        [_canonical_id(data_source_id), _canonical_id(property_id, encoded=True)],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
 @contextmanager
 def lock_destination(
     data_source_id: str, property_id: str, *, apply: bool
@@ -32,11 +41,7 @@ def lock_destination(
     if not apply:
         yield
         return
-    identity = json.dumps(
-        [_canonical_id(data_source_id), _canonical_id(property_id, encoded=True)],
-        separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(identity).hexdigest()
+    digest = destination_key(data_source_id, property_id)
     path = get_default_state_db_path().parent / "destination-locks" / f"{digest}.lock"
     try:
         lock = FileLock(path)

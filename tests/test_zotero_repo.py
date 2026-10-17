@@ -689,3 +689,47 @@ def test_invalid_collection_membership_stops_snapshot(
     with pytest.raises(RuntimeError, match="invalid collection membership"):
         ZoteroRepository(tmp_path, tmp_path)
     assert session.closed
+
+
+def test_supporting_files_selects_local_documents_and_ignores_bookmarks(tmp_path):
+    repo = _path_repo(storage_dir=tmp_path / "storage", data_dir=tmp_path)
+    item = ZoteroItem(
+        1, "PARENT01", None, "zotero://select/library/items/PARENT01", None
+    )
+    attachments = []
+    for index, name in enumerate(["data.xlsx", "paper.pdf", "ignore.bin"]):
+        path = tmp_path / name
+        path.write_bytes(b"test file")
+        attachments.append(
+            ZoteroAttachment(1, item.key, f"ATT0000{index}", str(path), None, None)
+        )
+    attachments.append(
+        ZoteroAttachment(
+            1,
+            item.key,
+            "LINK0001",
+            "https://example.com/online.pdf",
+            "application/pdf",
+            None,
+        )
+    )
+    repo._api_attachments = {1: attachments}
+    status, files, error = repo.select_source_files(item)
+    assert status == "OK"
+    assert error is None
+    assert {Path(file.absolute_path).suffix for file in files} == {".xlsx", ".pdf"}
+
+
+def test_missing_supporting_file_blocks_entire_parent(tmp_path):
+    repo = _path_repo(storage_dir=tmp_path / "storage", data_dir=tmp_path)
+    item = ZoteroItem(1, "PARENT01", None, "uri", None)
+    repo._api_attachments = {
+        1: [
+            ZoteroAttachment(
+                1, item.key, "ATT00001", str(tmp_path / "missing.xlsx"), None, None
+            )
+        ]
+    }
+    status, files, _ = repo.select_source_files(item)
+    assert status == "BROKEN_ATTACHMENT_PATH"
+    assert files == []
