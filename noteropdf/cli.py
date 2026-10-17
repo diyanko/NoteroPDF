@@ -30,7 +30,7 @@ from .config import (
     validate_zotero_data_dir,
 )
 from .logging_setup import setup_run_logging
-from .models import ZoteroLibrary
+from .models import PdfSelection, ZoteroLibrary
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
 from .settings import LocalSettings, save_settings
 from .state_store import StateStore
@@ -40,6 +40,7 @@ from .zotero_repo import ZoteroRepository
 
 _BLOCKING_SYNC_STATUSES = {
     Status.MULTIPLE_PDFS.value,
+    Status.INVALID_PDF_SELECTION.value,
     Status.BROKEN_ATTACHMENT_PATH.value,
     Status.MULTIPLE_NOTION_MATCHES.value,
     Status.NOTION_SCHEMA_ERROR.value,
@@ -89,7 +90,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_output_flags(parser)
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{sync,connect,doctor}",
+        metavar="{sync,connect,doctor,pdf}",
     )
 
     sync = sub.add_parser(
@@ -118,6 +119,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Check Zotero, Notion, credentials, and local storage",
     )
     _add_output_flags(doctor, suppress_defaults=True)
+    pdf = sub.add_parser(
+        "pdf", help="Inspect or remember an exact PDF attachment choice"
+    )
+    _add_output_flags(pdf, suppress_defaults=True)
+    pdf.add_argument("item", help="Exact parent item key in the selected library")
+    pdf.add_argument(
+        "attachment", nargs="?", help="Exact PDF attachment key to remember"
+    )
+    pdf.add_argument(
+        "--clear", action="store_true", help="Forget this item's PDF choice"
+    )
     return parser
 
 
@@ -388,6 +400,54 @@ def _load_ready_config() -> AppConfig:
     return load_app_config(credential_store=_credential_store())
 
 
+def _run_pdf(item_key: str, attachment_key: str | None, *, clear: bool) -> int:
+    if clear and attachment_key:
+        raise ValueError("Use an attachment key or --clear, not both.")
+    cfg = _load_ready_config()
+    store = StateStore(cfg.sync.state_db_path)
+    repo = None
+    try:
+        repo = ZoteroRepository(
+            cfg.zotero.storage_dir, cfg.zotero.data_dir, group_id=cfg.zotero.group_id
+        )
+        parents = [item for item in repo.all_items() if item.key == item_key]
+        if len(parents) != 1:
+            raise ValueError(
+                "That parent item key is unavailable in the selected library."
+            )
+        parent = parents[0]
+        if clear:
+            store.set_pdf_selection(parent.sync_key, None)
+            print("[OK] PDF choice cleared. Multiple PDFs will be skipped again.")
+            return 0
+        attachments = repo.list_child_attachments(parent.item_id, parent.key)
+        if attachment_key is None:
+            saved = store.get_pdf_selection(parent.sync_key)
+            print("PDF choices in the selected library (attachment keys):")
+            for att in attachments:
+                choice = PdfSelection(att.attachment_key, att.path_raw or "")
+                status, _, _ = repo.select_candidate_pdf(parent, selection=choice)
+                if status == Status.OK.value:
+                    marker = " [saved]" if saved == choice else ""
+                    print(f"- {att.attachment_key}{marker}")
+            print("[NEXT] Run `noteropdf pdf ITEM ATTACHMENT` to save an exact choice.")
+            return 0
+        matches = [att for att in attachments if att.attachment_key == attachment_key]
+        if len(matches) != 1:
+            raise ValueError("That attachment does not belong to this parent item.")
+        choice = PdfSelection(attachment_key, matches[0].path_raw or "")
+        status, _, _ = repo.select_candidate_pdf(parent, selection=choice)
+        if status != Status.OK.value:
+            raise ValueError("That attachment is not an available local PDF.")
+        store.set_pdf_selection(parent.sync_key, choice)
+        print("[OK] PDF choice saved for this library. Run sync to review its preview.")
+        return 0
+    finally:
+        if repo is not None:
+            repo.close()
+        store.close()
+
+
 def _print_summary(rows, *, preview: bool) -> None:
     counts = Counter(row.final_status for row in rows)
     uploads = sum(
@@ -618,6 +678,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_connect()
         if command == "doctor":
             return _run_doctor()
+        if command == "pdf":
+            return _run_pdf(args.item, args.attachment, clear=args.clear)
         if command == "sync":
             return _run_sync(
                 apply_without_prompt=bool(getattr(args, "apply", False)),

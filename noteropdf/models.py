@@ -52,10 +52,17 @@ class ZoteroItem:
 
 
 @dataclass(frozen=True)
+class PdfSelection:
+    attachment_key: str
+    path_raw: str
+
+
+@dataclass(frozen=True)
 class CandidatePdf:
     absolute_path: str
     size: int
     mtime_ns: int
+    attachment_key: str = ""
 
 
 @dataclass

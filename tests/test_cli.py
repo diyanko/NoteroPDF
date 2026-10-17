@@ -51,7 +51,7 @@ def test_parser_has_small_public_surface_and_default_sync():
     assert parser.parse_args(["connect"]).command == "connect"
     assert parser.parse_args(["doctor"]).command == "doctor"
     help_text = parser.format_help()
-    assert "{sync,connect,doctor}" in help_text
+    assert "{sync,connect,doctor,pdf}" in help_text
     assert "cleanup" not in help_text
     assert "setup" not in help_text
 
@@ -532,3 +532,52 @@ def test_changed_connection_blocks_apply_before_opening_engine(
     monkeypatch.setattr("noteropdf.cli.SyncEngine", Engine)
     assert _run_sync(apply_without_prompt=True) == 1
     assert engines == [cfg]
+
+
+def test_pdf_command_inspects_validates_saves_and_clears_without_notion(
+    monkeypatch, tmp_path, capsys
+):
+    from noteropdf.cli import _run_pdf
+    from noteropdf.models import ZoteroAttachment, ZoteroItem
+    from noteropdf.state_store import StateStore
+    from noteropdf.zotero_repo import ZoteroRepository
+
+    state_path = tmp_path / "state.sqlite3"
+    path = tmp_path / "paper.pdf"
+    path.write_bytes(b"pdf")
+    item = ZoteroItem(1, "ITEM", "Private title", "", None, ZoteroLibrary(123))
+    repo = object.__new__(ZoteroRepository)
+    repo._storage_dir = tmp_path
+    repo._data_dir = tmp_path
+    repo._api_parent_items = [item]
+    repo._api_attachments = {
+        1: [ZoteroAttachment(1, "ITEM", "PDF", str(path), "application/pdf", None)]
+    }
+    monkeypatch.setattr("noteropdf.cli.ZoteroRepository", lambda *args, **kwargs: repo)
+    monkeypatch.setattr(
+        "noteropdf.cli._load_ready_config",
+        lambda: SimpleNamespace(
+            zotero=SimpleNamespace(
+                storage_dir=tmp_path, data_dir=tmp_path, group_id=123
+            ),
+            sync=SimpleNamespace(state_db_path=state_path),
+        ),
+    )
+    assert _run_pdf("ITEM", None, clear=False) == 0
+    output = capsys.readouterr().out
+    assert "- PDF" in output
+    assert "Private title" not in output
+    assert str(path) not in output
+    assert _run_pdf("ITEM", "PDF", clear=False) == 0
+    store = StateStore(state_path)
+    assert store.get_pdf_selection("groups/123/ITEM").attachment_key == "PDF"
+    assert store.get_pdf_selection("ITEM") is None
+    store.close()
+    with pytest.raises(ValueError, match="does not belong"):
+        _run_pdf("ITEM", "WRONG", clear=False)
+    with pytest.raises(ValueError, match="unavailable"):
+        _run_pdf("OTHER", "PDF", clear=False)
+    assert _run_pdf("ITEM", None, clear=True) == 0
+    store = StateStore(state_path)
+    assert store.get_pdf_selection("groups/123/ITEM") is None
+    store.close()

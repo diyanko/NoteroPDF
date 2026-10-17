@@ -84,10 +84,23 @@ an unavailable group stops the run instead of falling back to another library.
 | `noteropdf sync` | The same complete sync workflow. |
 | `noteropdf sync --apply` | Preview and apply without a prompt; useful for automation. |
 | `noteropdf connect` | Choose a Zotero library, reconnect Notion, or choose a different database. |
+| `noteropdf pdf ITEM` | List available PDF attachment keys for an exact item key. |
+| `noteropdf pdf ITEM ATTACHMENT` | Remember the exact PDF to use for this item in the selected library. |
+| `noteropdf pdf ITEM --clear` | Forget a saved PDF choice. |
 | `noteropdf doctor` | Check Zotero, Notion, credentials, schema, and local storage. |
 | `noteropdf --version` | Show the installed version. |
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
+
+When an item has several PDFs, sync skips it until you explicitly choose one.
+Find the parent item and attachment keys in Zotero's item links, then run
+`noteropdf pdf ITEM` to see available local PDF attachment keys. Save your choice
+with `noteropdf pdf ITEM ATTACHMENT`, then run sync to review it. Choices stay
+separate for personal and group libraries, and the selection command only changes
+local preferences. It never uploads or changes Zotero or Notion. If the chosen
+attachment disappears, moves, or stops being a local PDF, sync skips the item
+until you choose again or clear the choice. Editing the contents of the chosen
+PDF follows the normal preview and confirmation workflow.
 
 ## Safe by Design
 

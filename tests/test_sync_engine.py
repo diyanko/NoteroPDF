@@ -94,6 +94,8 @@ def _make_engine(
         )
 
     class _State:
+        get_pdf_selection = staticmethod(lambda _key: None)
+
         def __init__(self):
             self.saved = None
 
@@ -227,6 +229,8 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
     pdf = _make_pdf(tmp_path)
 
     class _State:
+        get_pdf_selection = staticmethod(lambda _key: None)
+
         def get(self, _):
             return None
 
@@ -1022,7 +1026,9 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     )
     engine.zotero = Zotero()
     engine.notion = Notion()
-    engine.state = SimpleNamespace(get=lambda _key: None)
+    engine.state = SimpleNamespace(
+        get=lambda _key: None, get_pdf_selection=lambda _key: None
+    )
     engine._logger = SimpleNamespace(
         debug=lambda *_args, **_kwargs: None,
         warning=lambda *_args, **_kwargs: None,
@@ -1041,3 +1047,36 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     assert engine.zotero is None
     assert rows[0].action_taken == "preview_upload:missing_remote_pdf"
     assert engine.preview_actions()[0].notion_page_id == page_id
+
+
+def test_approval_binds_attachment_identity_even_when_two_keys_use_same_file(tmp_path):
+    pdf = replace(_make_pdf(tmp_path), attachment_key="FIRST")
+    engine, notion = _make_engine(tmp_path, pdf=pdf, preview=True)
+    engine._sync_one(_make_item())
+    actions = engine.preview_actions()
+    assert actions[0].attachment_key == "FIRST"
+    engine._apply_writes = True
+    engine._approved_actions = {"ABC123": actions[0]}
+    row = engine._sync_one(
+        _make_item(), selected_pdf=("OK", replace(pdf, attachment_key="OTHER"), None)
+    )
+    assert row.final_status == "STALE_PREVIEW"
+    assert notion.create_calls == 0
+
+
+def test_engine_reads_pdf_choice_using_library_scoped_key(tmp_path):
+    from noteropdf.models import PdfSelection
+
+    pdf = _make_pdf(tmp_path)
+    engine, _ = _make_engine(tmp_path, pdf=pdf)
+    item = replace(_make_item(), library=ZoteroLibrary(123))
+    choice = PdfSelection("CHOSEN", "storage:paper.pdf")
+    reads = []
+    engine.state.get_pdf_selection = lambda key: reads.append(key) or choice
+    selections = []
+    engine.zotero.select_candidate_pdf = lambda item, **kwargs: (
+        selections.append(kwargs) or ("OK", pdf, None)
+    )
+    engine._select_pdf(item)
+    assert reads == ["groups/123/ABC123"]
+    assert selections == [{"selection": choice}]

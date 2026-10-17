@@ -36,6 +36,7 @@ class PreviewAction:
     pdf_mtime_ns: int
     pdf_sha256: str
     remote_files_signature: tuple[tuple[str, str, str], ...] = ()
+    attachment_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -447,9 +448,7 @@ class SyncEngine:
         zotero = self._require_zotero()
         notion = self._require_notion()
         items = list(zotero.all_items())
-        selected_pdfs = {
-            item.sync_key: zotero.select_candidate_pdf(item) for item in items
-        }
+        selected_pdfs = {item.sync_key: self._select_pdf(item) for item in items}
         zotero.close()
         self.zotero = None
 
@@ -508,6 +507,15 @@ class SyncEngine:
     def preview_actions(self) -> tuple[PreviewAction, ...]:
         return tuple(self._preview_actions.values())
 
+    def _select_pdf(
+        self, item: ZoteroItem
+    ) -> tuple[str, CandidatePdf | None, str | None]:
+        selection = self._require_state().get_pdf_selection(item.sync_key)
+        zotero = self._require_zotero()
+        if selection is None:
+            return zotero.select_candidate_pdf(item)
+        return zotero.select_candidate_pdf(item, selection=selection)
+
     def _sync_one(
         self,
         item: ZoteroItem,
@@ -515,7 +523,7 @@ class SyncEngine:
         selected_pdf: tuple[str, CandidatePdf | None, str | None] | None = None,
     ) -> SyncRow:
         if selected_pdf is None:
-            selected_pdf = self._require_zotero().select_candidate_pdf(item)
+            selected_pdf = self._select_pdf(item)
         pdf_status, pdf, pdf_msg = selected_pdf
         if pdf_status != Status.OK.value:
             return SyncRow(
@@ -586,6 +594,7 @@ class SyncEngine:
                     and approved.pdf_size == pdf.size
                     and approved.pdf_mtime_ns == pdf.mtime_ns
                     and approved.pdf_sha256 == current_hash
+                    and approved.attachment_key == pdf.attachment_key
                     and approved.remote_files_signature
                     == self._snapshot_files_signature(match.page_id)
                 )
@@ -695,6 +704,7 @@ class SyncEngine:
                 pdf_size=pdf.size,
                 pdf_mtime_ns=pdf.mtime_ns,
                 pdf_sha256=digest,
+                attachment_key=pdf.attachment_key,
                 remote_files_signature=self._snapshot_files_signature(match.page_id),
             )
             return SyncRow(

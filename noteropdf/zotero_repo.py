@@ -9,7 +9,13 @@ from typing import Any
 
 import requests
 
-from .models import CandidatePdf, ZoteroAttachment, ZoteroItem, ZoteroLibrary
+from .models import (
+    CandidatePdf,
+    PdfSelection,
+    ZoteroAttachment,
+    ZoteroItem,
+    ZoteroLibrary,
+)
 
 LOCAL_API_BASE_URL = "http://127.0.0.1:23119/api"
 _LOCAL_API_TIMEOUT = (0.5, 10.0)
@@ -458,9 +464,24 @@ class ZoteroRepository:
         return Path(resolved_path).expanduser().resolve()
 
     def select_candidate_pdf(
-        self, parent: ZoteroItem
+        self, parent: ZoteroItem, *, selection: PdfSelection | None = None
     ) -> tuple[str, CandidatePdf | None, str | None]:
         attachments = self.list_child_attachments(parent.item_id, parent.key)
+        if selection is not None:
+            attachments = [
+                att
+                for att in attachments
+                if att.attachment_key == selection.attachment_key
+                and att.parent_key == parent.key
+                and att.parent_item_id == parent.item_id
+                and att.path_raw == selection.path_raw
+            ]
+            if len(attachments) != 1:
+                return (
+                    "INVALID_PDF_SELECTION",
+                    None,
+                    "The saved PDF choice is missing or moved. Choose it again with `noteropdf pdf`.",
+                )
 
         valid: list[CandidatePdf] = []
         broken_found = False
@@ -492,9 +513,16 @@ class ZoteroRepository:
                     absolute_path=str(path),
                     size=stat.st_size,
                     mtime_ns=stat.st_mtime_ns,
+                    attachment_key=att.attachment_key,
                 )
             )
 
+        if selection is not None and len(valid) != 1:
+            return (
+                "INVALID_PDF_SELECTION",
+                None,
+                "The saved PDF choice is unavailable or is no longer a PDF. Choose it again with `noteropdf pdf`.",
+            )
         if len(valid) == 0 and broken_found:
             return (
                 "BROKEN_ATTACHMENT_PATH",
