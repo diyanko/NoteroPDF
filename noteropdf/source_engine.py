@@ -85,49 +85,12 @@ class SourceFilesEngine(SyncEngine):
     ) -> tuple[tuple[str, str, str], ...]:
         if page is None:
             page = self._snapshot.get_page(page_id) if self._snapshot else None
-        if not page or page.get("in_trash") or page.get("archived"):
-            raise ValueError("The supporting-file destination is unavailable.")
-        actual_id = page.get("id")
-        if not isinstance(actual_id, str) or NotionDataSourceSnapshot.page_id_key(
-            actual_id
-        ) != NotionDataSourceSnapshot.page_id_key(page_id):
-            raise ValueError(
-                "The supporting-file response does not identify the selected destination."
-            )
-        parent = page.get("parent") or {}
-        if (
-            not isinstance(parent, dict)
-            or not isinstance(parent.get("data_source_id"), str)
-            or not isinstance(page.get("properties"), dict)
-        ):
-            raise TypeError("The supporting-file destination could not be verified.")
-        if parent.get(
-            "type"
-        ) != "data_source_id" or NotionDataSourceSnapshot.page_id_key(
-            parent.get("data_source_id", "")
-        ) != NotionDataSourceSnapshot.page_id_key(self.cfg.notion.data_source_id):
-            raise ValueError(
-                "The supporting-file destination moved to another database."
-            )
-        prop = NotionClient.get_page_property(page, self._pdf_property_ref)
-        if (
-            not prop
-            or prop.get("type") != "files"
-            or not isinstance(prop.get("files"), list)
-        ):
-            raise ValueError("The supporting files property could not be verified.")
-        raw_files = prop["files"]
-        signature = NotionClient.files_property_signature(page, self._pdf_property_ref)
-        if (
-            len(signature) != len(raw_files)
-            or any(not isinstance(row, dict) for row in raw_files)
-            or any(
-                not name or not kind or not identity
-                for name, kind, identity in signature
-            )
-        ):
-            raise ValueError("The supporting files property contains unknown entries.")
-        return signature
+        return NotionClient.verified_files_signature(
+            page,
+            page_id=page_id,
+            data_source_id=self.cfg.notion.data_source_id,
+            property_ref=self._pdf_property_ref,
+        )
 
     def _fresh_files_signature(
         self, page_id: str

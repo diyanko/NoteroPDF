@@ -17,6 +17,14 @@ from noteropdf.sync_engine import MatchResult, PreviewAction, SyncEngine
 from noteropdf.util import sha256_file
 
 
+@pytest.fixture(autouse=True)
+def isolate_destination_storage(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "noteropdf.destination_lock.get_default_state_db_path",
+        lambda: tmp_path / "app" / "state.sqlite3",
+    )
+
+
 def _make_item(
     *,
     key: str = "ABC123",
@@ -70,6 +78,7 @@ def _make_engine(
 
     page = {
         "id": "page-1",
+        "parent": {"type": "data_source_id", "data_source_id": "source"},
         "properties": {
             "pdf-id": {
                 "id": "pdf-id",
@@ -142,6 +151,7 @@ def _make_engine(
             filename = NotionClient.normalize_attachment_filename(kwargs["filename"])
             return {
                 "id": "page-1",
+                "parent": {"type": "data_source_id", "data_source_id": "source"},
                 "properties": {
                     "pdf-id": {
                         "id": "pdf-id",
@@ -187,7 +197,7 @@ def _make_engine(
     casted._resolve_match = lambda _item: MatchResult(
         Status.OK, "page-1", "https://notion.so/page-1", None
     )
-    casted.data_source_id = "ds"
+    casted.data_source_id = "source"
     return engine, casted.notion
 
 
@@ -219,6 +229,7 @@ def _page(
     return {
         "object": "page",
         "id": page_id,
+        "parent": {"type": "data_source_id", "data_source_id": "source"},
         "url": f"https://notion.so/{page_id}",
         "in_trash": in_trash,
         "properties": properties,
@@ -259,6 +270,7 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
         def attach_file_upload_to_page(self, **kwargs):
             return {
                 "id": "page-1",
+                "parent": {"type": "data_source_id", "data_source_id": "ds"},
                 "properties": {
                     "pdf-id": {
                         "id": "pdf-id",
@@ -298,6 +310,7 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
     casted._pdf_property_ref = "pdf-id"
     page = {
         "id": "page-1",
+        "parent": {"type": "data_source_id", "data_source_id": "ds"},
         "properties": {
             "pdf-id": {
                 "id": "pdf-id",
@@ -901,6 +914,7 @@ def test_apply_skips_when_remote_files_change_before_upload(tmp_path: Path):
     engine._get_cached_hash = lambda _path: digest
     notion.get_page = lambda _page_id: {
         "id": "page-1",
+        "parent": {"type": "data_source_id", "data_source_id": "ds"},
         "properties": {
             "pdf-id": {
                 "id": "pdf-id",
@@ -929,6 +943,7 @@ def test_apply_checks_remote_files_again_immediately_before_attach(tmp_path: Pat
     unchanged_page = engine._snapshot.get_page("page-1")
     changed_page = {
         "id": "page-1",
+        "parent": {"type": "data_source_id", "data_source_id": "ds"},
         "properties": {
             "pdf-id": {
                 "id": "pdf-id",
@@ -981,6 +996,7 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     page = {
         "object": "page",
         "id": page_id,
+        "parent": {"type": "data_source_id", "data_source_id": "source"},
         "url": f"https://www.notion.so/{page_id}",
         "properties": {"pdf-id": {"id": "pdf-id", "type": "files", "files": []}},
     }

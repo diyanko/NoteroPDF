@@ -395,16 +395,32 @@ class SyncEngine:
         if snapshot is None:
             raise RuntimeError("Notion snapshot must be loaded before syncing")
         page = snapshot.get_page(page_id)
-        return NotionClient.files_property_signature(page or {}, pdf_property)
+        try:
+            return NotionClient.verified_files_signature(
+                page,
+                page_id=page_id,
+                data_source_id=self.data_source_id or self.cfg.notion.data_source_id,
+                property_ref=pdf_property,
+            )
+        except ValueError as exc:
+            raise NotionApiError(
+                "NOTION_SCHEMA_ERROR",
+                "The selected Notion destination could not be verified. Preview again before uploading.",
+            ) from exc
 
     def _fresh_files_signature(
         self, page_id: str
     ) -> tuple[tuple[str, str, str], ...] | None:
         page = self._require_notion().get_page(page_id)
-        if page is None or page.get("in_trash", page.get("archived", False)):
+        try:
+            return NotionClient.verified_files_signature(
+                page,
+                page_id=page_id,
+                data_source_id=self.data_source_id or self.cfg.notion.data_source_id,
+                property_ref=self._pdf_property_ref,
+            )
+        except ValueError:
             return None
-        pdf_property = self._pdf_property_ref
-        return NotionClient.files_property_signature(page, pdf_property)
 
     def _revalidate_before_upload(
         self,
@@ -862,9 +878,15 @@ class SyncEngine:
                 error_message=self._format_api_error(exc),
             )
 
-        attached_signature = NotionClient.files_property_signature(
-            attached_page, self._pdf_property_ref
-        )
+        try:
+            attached_signature = NotionClient.verified_files_signature(
+                attached_page,
+                page_id=match.page_id,
+                data_source_id=self.data_source_id or self.cfg.notion.data_source_id,
+                property_ref=self._pdf_property_ref,
+            )
+        except ValueError:
+            return self._state_save_failed_row(item, pdf, match)
         if (
             len(attached_signature) != 1
             or not attached_signature[0][0]

@@ -505,6 +505,61 @@ class NotionClient:
             signatures.append((str(row.get("name") or "").strip(), file_type, identity))
         return tuple(signatures)
 
+    @classmethod
+    def verified_files_signature(
+        cls,
+        page: dict[str, Any] | None,
+        *,
+        page_id: str,
+        data_source_id: str,
+        property_ref: str,
+    ) -> tuple[tuple[str, str, str], ...]:
+        """Verify the current page, database and full files field before use."""
+        if not isinstance(page, dict) or page.get("in_trash") or page.get("archived"):
+            raise ValueError("The selected Notion page is unavailable.")
+        actual_id = page.get("id")
+        if not isinstance(actual_id, str) or NotionDataSourceSnapshot.page_id_key(
+            actual_id
+        ) != NotionDataSourceSnapshot.page_id_key(page_id):
+            raise ValueError("Notion did not identify the selected page.")
+        parent = page.get("parent")
+        if (
+            not isinstance(parent, dict)
+            or parent.get("type") != "data_source_id"
+            or not isinstance(parent.get("data_source_id"), str)
+            or NotionDataSourceSnapshot.page_id_key(parent["data_source_id"])
+            != NotionDataSourceSnapshot.page_id_key(data_source_id)
+        ):
+            raise ValueError("The selected Notion page moved to another database.")
+        if not isinstance(page.get("properties"), dict):
+            raise ValueError("The selected Notion field could not be verified.")
+        prop = cls.get_page_property(page, property_ref)
+        if (
+            not prop
+            or prop.get("type") != "files"
+            or not isinstance(prop.get("files"), list)
+        ):
+            raise ValueError("The selected Notion files field could not be verified.")
+        raw_files = prop["files"]
+        if any(
+            not isinstance(row, dict)
+            or not isinstance(row.get("name"), str)
+            or not row["name"].strip()
+            or row.get("type") not in {"file", "file_upload", "external"}
+            for row in raw_files
+        ):
+            raise ValueError(
+                "The selected Notion files field contains unknown entries."
+            )
+        signature = cls.files_property_signature(page, property_ref)
+        if len(signature) != len(raw_files) or any(
+            not name or not kind or not identity for name, kind, identity in signature
+        ):
+            raise ValueError(
+                "The selected Notion files field contains unverifiable entries."
+            )
+        return signature
+
     def build_data_source_snapshot(
         self,
         data_source_id: str,
