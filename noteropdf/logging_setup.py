@@ -7,6 +7,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import ClassVar
 
+from .profiles import normalize_profile, recovery_guidance
+
 
 class _PrivateRotatingFileHandler(RotatingFileHandler):
     """Create diagnostic logs with owner-only permissions where supported."""
@@ -31,13 +33,14 @@ class _UserConsoleFormatter(logging.Formatter):
     }
     RESET = "\033[0m"
 
-    def __init__(self, *, use_color: bool, verbose: bool):
+    def __init__(self, *, use_color: bool, verbose: bool, profile: str | None = None):
         super().__init__()
         self.use_color = use_color
         self.verbose = verbose
+        self.profile = normalize_profile(profile)
 
     def format(self, record: logging.LogRecord) -> str:
-        message = record.getMessage()
+        message = recovery_guidance(record.getMessage(), self.profile)
         if record.levelno >= logging.ERROR and not message.startswith("[ERROR]"):
             message = f"[ERROR] {message}"
         elif record.levelno >= logging.WARNING and not message.startswith("[WARN]"):
@@ -67,6 +70,8 @@ def setup_run_logging(
     log_dir: Path,
     no_color: bool = False,
     verbose: bool = False,
+    *,
+    profile: str | None = None,
 ) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "noteropdf.log"
@@ -81,7 +86,9 @@ def setup_run_logging(
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
     stream_handler.setFormatter(
-        _UserConsoleFormatter(use_color=_should_use_color(no_color), verbose=verbose)
+        _UserConsoleFormatter(
+            use_color=_should_use_color(no_color), verbose=verbose, profile=profile
+        )
     )
     root.addHandler(stream_handler)
 

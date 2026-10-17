@@ -32,7 +32,8 @@ from .config import (
 from .logging_setup import setup_run_logging
 from .models import PdfSelection, SyncScope, ZoteroLibrary, validate_zotero_key
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
-from .profiles import normalize_profile, validate_profile_name
+from .profiles import connect_command as _connect_command
+from .profiles import normalize_profile, recovery_guidance, validate_profile_name
 from .settings import LocalSettings, save_settings
 from .state_store import StateStore
 from .status import Status
@@ -91,10 +92,6 @@ def _add_profile_flag(
         metavar="NAME",
         help="Use a saved connection (default: the original connection)",
     )
-
-
-def _connect_command(profile: str | None) -> str:
-    return f"noteropdf connect --profile {profile}" if profile else "noteropdf connect"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -507,7 +504,7 @@ def _run_pdf(
         store.close()
 
 
-def _print_summary(rows, *, preview: bool) -> None:
+def _print_summary(rows, *, preview: bool, profile: str | None = None) -> None:
     counts = Counter(row.final_status for row in rows)
     uploads = sum(
         1
@@ -552,7 +549,7 @@ def _print_summary(rows, *, preview: bool) -> None:
         for row in attention_rows[:10]:
             title = row.title or row.zotero_item_key
             reason = row.error_message or row.final_status.replace("_", " ").lower()
-            print(f"  - {title}: {reason}")
+            print(f"  - {title}: {recovery_guidance(reason, profile)}")
         if len(attention_rows) > 10:
             print(f"  - ...and {len(attention_rows) - 10} more; see the diagnostic log")
 
@@ -590,7 +587,7 @@ def _run_sync(
         approved_actions = engine.preview_actions()
     finally:
         engine.close()
-    _print_summary(preview, preview=True)
+    _print_summary(preview, preview=True, profile=profile)
     pending = _preview_upload_count(preview)
     preview_blockers = _blocking_issue_count(preview)
     if pending == 0:
@@ -640,7 +637,7 @@ def _run_sync(
         )
     finally:
         engine.close()
-    _print_summary(result, preview=False)
+    _print_summary(result, preview=False, profile=profile)
     approved_keys = {action.zotero_item_key for action in approved_actions}
     completed_keys = {
         row.zotero_item_key for row in result if row.final_status in {"OK", "UNCHANGED"}
@@ -665,7 +662,9 @@ def _run_doctor(profile: str | None = None) -> int:
     try:
         settings = load_local_settings(profile=profile)
     except (OSError, sqlite3.Error, ValueError) as exc:
-        print(f"- [FAIL] Local settings cannot be read: {exc}")
+        print(
+            f"- [FAIL] Local settings cannot be read: {recovery_guidance(str(exc), profile)}"
+        )
         settings = LocalSettings()
         ready = False
 
@@ -678,13 +677,15 @@ def _run_doctor(profile: str | None = None) -> int:
             validated = validate_zotero_data_dir(Path(zotero_dir))
             print(f"- [OK] Zotero data folder: {validated}")
         except ValueError as exc:
-            print(f"- [FAIL] {exc}")
+            print(f"- [FAIL] {recovery_guidance(str(exc), profile)}")
             ready = False
 
     try:
         token, token_source = resolve_access_token(_credential_store(profile))
     except CredentialStoreError as exc:
-        print(f"- [FAIL] Notion credentials cannot be read: {exc}")
+        print(
+            f"- [FAIL] Notion credentials cannot be read: {recovery_guidance(str(exc), profile)}"
+        )
         token = ""
         token_source = "missing"
         ready = False
@@ -714,7 +715,7 @@ def _run_doctor(profile: str | None = None) -> int:
     engine = SyncEngine(cfg, open_state=False)
     try:
         for line in engine.doctor()[1:]:
-            print(line)
+            print(recovery_guidance(line, profile))
     finally:
         engine.close()
     print("[OK] Zotero and Notion are ready.")
@@ -731,7 +732,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         log_path = setup_run_logging(
-            get_profile_log_dir(profile), no_color=no_color, verbose=verbose
+            get_profile_log_dir(profile),
+            no_color=no_color,
+            verbose=verbose,
+            profile=profile,
         )
     except OSError as exc:
         if command != "doctor":
@@ -774,10 +778,10 @@ def main(argv: list[str] | None = None) -> int:
         NotionApiError,
         ValueError,
     ) as exc:
-        logger.error("%s", exc)
+        logger.error("%s", recovery_guidance(str(exc), profile))
         hint = getattr(exc, "hint", None)
         if hint:
-            logger.info("[NEXT] %s", hint)
+            logger.info("[NEXT] %s", recovery_guidance(hint, profile))
         elif isinstance(exc, SetupRequired):
             logger.info("[NEXT] Run `%s` in a terminal.", _connect_command(profile))
         return 2
@@ -788,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         if verbose:
             logger.exception("Command failed")
         else:
-            logger.error("Command failed: %s", exc)
+            logger.error("Command failed: %s", recovery_guidance(str(exc), profile))
             logger.info("[NEXT] Run again with --verbose for technical details.")
         return 1
     finally:
