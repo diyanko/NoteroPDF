@@ -73,3 +73,25 @@ def test_state_store_rejects_empty_setting_key(tmp_path: Path):
             store.update_settings({"": "value"})
     finally:
         store.close()
+
+
+def test_pdf_choices_are_persistent_and_separate_for_each_library(tmp_path):
+    from noteropdf.models import PdfSelection
+
+    path = tmp_path / "state.sqlite3"
+    first = PdfSelection("PDF1", "storage:paper.pdf")
+    second = PdfSelection("PDF2", "storage:paper.pdf")
+    store = StateStore(path)
+    store.set_pdf_selection("ITEM", first)
+    store.set_pdf_selection("groups/123/ITEM", second)
+    store.close()
+    store = StateStore(path)
+    try:
+        assert store.get_pdf_selection("ITEM") == first
+        assert store.get_pdf_selection("groups/123/ITEM") == second
+        assert store.get_pdf_selection("groups/456/ITEM") is None
+        store.set_pdf_selection("ITEM", None)
+        assert store.get_pdf_selection("ITEM") is None
+        assert store.get_pdf_selection("groups/123/ITEM") == second
+    finally:
+        store.close()
