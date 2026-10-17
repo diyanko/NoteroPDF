@@ -89,7 +89,7 @@ def test_source_preview_shows_filename_only_in_local_terminals(
     monkeypatch.setattr(cli, "_prompt_yes_no", lambda *_args, **_kwargs: False)
     result = cli._run_sources(
         item_keys=("PARENT01",),
-        property_name="Source files",
+        property_name=property_name,
         apply_without_prompt=False,
     )
     assert result == (0 if input_tty else 2)
