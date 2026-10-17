@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from noteropdf import zotero_repo
-from noteropdf.models import ZoteroAttachment, ZoteroItem
+from noteropdf.models import ZoteroAttachment, ZoteroItem, ZoteroLibrary
 from noteropdf.zotero_repo import ZoteroRepository
 
 
@@ -17,6 +17,7 @@ def _expected_windows_drive_path(path_without_drive: str) -> Path:
 
 def _path_repo(*, storage_dir: Path, data_dir: Path) -> ZoteroRepository:
     repo = object.__new__(ZoteroRepository)
+    repo._library = ZoteroLibrary()
     repo._storage_dir = storage_dir.resolve()
     repo._data_dir = data_dir.resolve()
     repo._api_parent_items = []
@@ -32,12 +33,20 @@ class _FakeResponse:
         version: str = "10",
         status_code: int = 200,
         api_version: str = "3",
+        total: int | str | None = None,
     ):
         self._payload = payload
         self.status_code = status_code
         self.headers = {
             "Zotero-API-Version": api_version,
             "Last-Modified-Version": version,
+            "Total-Results": str(
+                total
+                if total is not None
+                else len(payload)
+                if isinstance(payload, list)
+                else 0
+            ),
         }
 
     def json(self) -> object:
@@ -148,7 +157,11 @@ def test_local_api_snapshot_is_preferred_and_consistent(
     assert session.closed is True
     assert len(session.calls) == 1
     url, kwargs = session.calls[0]
-    assert url == "http://127.0.0.1:23119/api/users/0/items"
+    assert url == (
+        "http://127.0.0.1:23119/api/users/0/items"
+        "?limit=100&start=0&sort=dateAdded&direction=asc"
+    )
+    assert kwargs["allow_redirects"] is False
     assert kwargs["headers"] == {
         "Accept": "application/json",
         "Zotero-API-Version": "3",
@@ -482,3 +495,132 @@ def test_notero_link_requires_unique_exact_notion_host(tmp_path: Path):
         assert repo.find_notero_page_link_for_parent(1) is None
     finally:
         repo.close()
+
+
+def test_group_snapshot_reads_only_selected_library(tmp_path, monkeypatch):
+    pdf = tmp_path / "storage" / "PDF0001" / "paper.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"pdf")
+    records = _api_items(pdf)
+    for record in records:
+        record["library"] = {"type": "group", "id": 123}
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse(records)])
+    repo = ZoteroRepository(tmp_path / "storage", tmp_path, group_id=123)
+    item = repo.all_items()[0]
+    assert item.key == "PARENT1"
+    assert item.sync_key == "groups/123/PARENT1"
+    assert item.zotero_uri == "zotero://select/groups/123/items/PARENT1"
+    assert item.notero_page_url is not None
+    assert repo.select_candidate_pdf(item)[0] == "OK"
+    assert len(session.calls) == 1
+    assert "/groups/123/items?" in session.calls[0][0]
+    assert session.closed
+
+
+def test_missing_group_never_falls_back_to_personal_library(tmp_path, monkeypatch):
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse({}, status_code=404)])
+    with pytest.raises(RuntimeError, match="selected group library is unavailable"):
+        ZoteroRepository(tmp_path, tmp_path, group_id=123)
+    assert len(session.calls) == 1
+    assert "/groups/123/items?" in session.calls[0][0]
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    "library", [None, {"type": "user", "id": 123}, {"type": "group", "id": 456}]
+)
+def test_group_snapshot_rejects_wrong_library(tmp_path, monkeypatch, library):
+    record = _api_parent_record()
+    record["library"] = library
+    _use_fake_local_api(monkeypatch, [_FakeResponse([record])])
+    with pytest.raises(RuntimeError, match="outside the selected group"):
+        ZoteroRepository(tmp_path, tmp_path, group_id=123)
+
+
+@pytest.mark.parametrize("group_id", [0, -1, True, "123", 1.5])
+def test_invalid_group_id_is_rejected_before_requests(tmp_path, monkeypatch, group_id):
+    session = _use_fake_local_api(monkeypatch, [])
+    with pytest.raises(ValueError, match="positive integer"):
+        ZoteroRepository(tmp_path, tmp_path, group_id=group_id)
+    assert not session.calls
+
+
+def test_pagination_keeps_parents_and_attachments_together(tmp_path, monkeypatch):
+    pdf = tmp_path / "storage" / "PDF0001" / "paper.pdf"
+    pdf.parent.mkdir(parents=True)
+    pdf.write_bytes(b"pdf")
+    records = _api_items(pdf)
+    session = _use_fake_local_api(
+        monkeypatch,
+        [
+            _FakeResponse(records[:1], total=3),
+            _FakeResponse(records[1:], total=3),
+        ],
+    )
+    repo = ZoteroRepository(tmp_path / "storage", tmp_path)
+    assert repo.select_candidate_pdf(repo.all_items()[0])[0] == "OK"
+    assert "start=1" in session.calls[1][0]
+
+
+@pytest.mark.parametrize(
+    "second,match",
+    [
+        (_FakeResponse([], total=2, version="11"), "changed during scanning"),
+        (_FakeResponse([], total=3), "changed during scanning"),
+        (_FakeResponse([], total=2), "incomplete or inconsistent"),
+        (_FakeResponse([_api_parent_record()], total=2), "duplicate item key"),
+        (_FakeResponse([], total="invalid"), "Total-Results"),
+    ],
+)
+def test_inconsistent_pagination_fails_closed(tmp_path, monkeypatch, second, match):
+    session = _use_fake_local_api(
+        monkeypatch,
+        [
+            _FakeResponse([_api_parent_record()], total=2),
+            second,
+        ],
+    )
+    with pytest.raises(RuntimeError, match=match):
+        ZoteroRepository(tmp_path, tmp_path)
+    assert session.closed
+
+
+def test_group_discovery_needs_no_library_version(monkeypatch):
+    session = _use_fake_local_api(
+        monkeypatch,
+        [
+            _FakeResponse(
+                [
+                    {"data": {"id": 456, "name": "Second group"}},
+                    {"data": {"id": 123, "name": "First group"}},
+                ],
+                version="",
+            )
+        ],
+    )
+    assert ZoteroRepository.list_libraries() == [
+        ZoteroLibrary(),
+        ZoteroLibrary(123, "First group"),
+        ZoteroLibrary(456, "Second group"),
+    ]
+    assert session.calls[0][0].endswith("/users/0/groups")
+    assert session.trust_env is False
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    "records,total",
+    [
+        ({}, 0),
+        ([{"data": {"id": 123, "name": "Group"}}], 2),
+        ([{"data": {"id": 0, "name": "Group"}}], 1),
+        ([{"data": {"id": True, "name": "Group"}}], 1),
+        ([{"data": {"id": 123, "name": ""}}], 1),
+        ([{"data": {"id": 123, "name": "Group"}}] * 2, 2),
+    ],
+)
+def test_group_discovery_rejects_ambiguous_responses(monkeypatch, records, total):
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse(records, total=total)])
+    with pytest.raises(RuntimeError):
+        ZoteroRepository.list_libraries()
+    assert session.closed

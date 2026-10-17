@@ -15,9 +15,10 @@ from noteropdf.cli import (
     _select_pdf_property,
     _select_target,
     _select_zotero_directory,
+    _select_zotero_library,
     main,
 )
-from noteropdf.models import SyncRow
+from noteropdf.models import SyncRow, ZoteroLibrary
 from noteropdf.notion_client import (
     NotionApiError,
     NotionProperty,
@@ -213,7 +214,8 @@ def test_interactive_sync_applies_only_actions_from_preview(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    cfg = object()
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
     monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *args, **kwargs: True)
@@ -242,7 +244,8 @@ def test_noninteractive_sync_is_preview_only_without_apply(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    cfg = object()
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
 
@@ -269,7 +272,8 @@ def test_apply_returns_failure_when_an_upload_was_not_completed(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    cfg = object()
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
 
@@ -292,7 +296,8 @@ def test_preview_returns_failure_when_only_action_is_blocked(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: object())
+    cfg = object()
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
 
     assert _run_sync(apply_without_prompt=False) == 1
@@ -368,6 +373,9 @@ def test_validated_token_is_saved_before_database_selection(
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
     )
+    monkeypatch.setattr(
+        "noteropdf.cli._select_zotero_library", lambda _settings: ZoteroLibrary()
+    )
     monkeypatch.setattr("noteropdf.cli._credential_store", FakeStore)
     monkeypatch.setattr(
         "noteropdf.cli._authorize_notion",
@@ -385,10 +393,12 @@ def test_validated_token_is_saved_before_database_selection(
     assert saved == [replacement]
 
 
+@pytest.mark.parametrize("group_id", [None, 123])
 def test_connect_replaces_a_rejected_saved_token_in_one_run(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, group_id
 ):
     saved = []
+    connections = []
     authorize_calls = []
 
     class Store:
@@ -421,6 +431,10 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
     )
+    monkeypatch.setattr(
+        "noteropdf.cli._select_zotero_library",
+        lambda _settings: ZoteroLibrary(group_id),
+    )
     monkeypatch.setattr("noteropdf.cli._credential_store", Store)
     monkeypatch.setattr("noteropdf.cli._authorize_notion", authorize)
     monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotion)
@@ -432,8 +446,89 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         "noteropdf.cli._select_pdf_property",
         lambda _notion, _target, _existing: pdf,
     )
-    monkeypatch.setattr("noteropdf.cli._save_connection", lambda _settings: None)
+    monkeypatch.setattr("noteropdf.cli._save_connection", connections.append)
 
     assert _run_connect() == 0
     assert authorize_calls == ["expired-token", None]
     assert saved == ["replacement-token"]
+    assert connections[0].zotero_group_id == group_id
+
+
+def test_library_selection_offers_personal_and_groups(monkeypatch):
+    libraries = [ZoteroLibrary(), ZoteroLibrary(123, "Research")]
+    monkeypatch.setattr(
+        "noteropdf.cli.ZoteroRepository.list_libraries", lambda: libraries
+    )
+    choices = []
+
+    def choose(_prompt, labels):
+        choices.extend(labels)
+        return 1
+
+    monkeypatch.setattr("noteropdf.cli._choose_number", choose)
+    assert _select_zotero_library(LocalSettings()) == libraries[1]
+    assert choices == ["My Library [saved]", "Research (group 123)"]
+
+
+def test_missing_saved_group_requires_explicit_choice(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "noteropdf.cli.ZoteroRepository.list_libraries", lambda: [ZoteroLibrary()]
+    )
+    prompts = []
+    monkeypatch.setattr(
+        "noteropdf.cli._choose_number",
+        lambda prompt, _labels: prompts.append(prompt) or 0,
+    )
+    assert _select_zotero_library(LocalSettings(zotero_group_id=123)).group_id is None
+    assert len(prompts) == 1
+    assert "saved group is unavailable" in capsys.readouterr().out
+
+
+def test_only_personal_library_needs_no_selection(monkeypatch):
+    monkeypatch.setattr(
+        "noteropdf.cli.ZoteroRepository.list_libraries", lambda: [ZoteroLibrary()]
+    )
+    assert _select_zotero_library(LocalSettings()) == ZoteroLibrary()
+
+
+@pytest.mark.parametrize("changed_field", ["zotero", "notion"])
+def test_changed_connection_blocks_apply_before_opening_engine(
+    monkeypatch, changed_field
+):
+    from dataclasses import replace
+
+    from noteropdf.config import AppConfig, NotionConfig, SyncConfig, ZoteroConfig
+
+    cfg = AppConfig(
+        ZoteroConfig(Path("data"), Path("data/storage")),
+        NotionConfig("version", "source", "pdf"),
+        SyncConfig(Path("state.sqlite3"), Path("logs")),
+        "test-token",
+        "keyring",
+    )
+    changed = (
+        replace(cfg, zotero=replace(cfg.zotero, group_id=123))
+        if changed_field == "zotero"
+        else replace(cfg, notion=replace(cfg.notion, pdf_property_id="other-pdf"))
+    )
+    configs = iter([cfg, changed])
+    engines = []
+
+    class Engine:
+        def __init__(self, config):
+            engines.append(config)
+
+        def sync(self, *, apply):
+            assert not apply
+            return [_row("preview_upload:first_sync")]
+
+        def preview_actions(self):
+            return (PreviewAction("ABC", "page", "paper.pdf", 10, 20, "digest"),)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: next(configs))
+    monkeypatch.setattr("noteropdf.cli.SyncEngine", Engine)
+    assert _run_sync(apply_without_prompt=True) == 1
+    assert engines == [cfg]

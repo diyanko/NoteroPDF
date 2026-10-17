@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from noteropdf.models import CandidatePdf, ZoteroItem
+from noteropdf.models import CandidatePdf, ZoteroItem, ZoteroLibrary
 from noteropdf.notion_client import (
     NotionApiError,
     NotionClient,
@@ -341,6 +341,69 @@ def test_sync_one_marks_unchanged_when_remote_file_is_healthy(tmp_path: Path):
     assert notion.create_calls == 0
 
 
+def test_group_upload_saves_library_scoped_history(tmp_path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf)
+    item = replace(_make_item(), library=ZoteroLibrary(123))
+    row = engine._sync_one(item)
+    assert row.final_status == Status.OK.value
+    assert row.zotero_item_key == "groups/123/ABC123"
+    assert engine.state.saved.zotero_item_key == "groups/123/ABC123"
+    assert notion.attach_calls == 1
+
+
+@pytest.mark.parametrize("other_library", [ZoteroLibrary(), ZoteroLibrary(456)])
+def test_group_cannot_reuse_another_librarys_preview(tmp_path, other_library):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, preview=True)
+    engine._sync_one(replace(_make_item(), library=other_library))
+    actions = engine.preview_actions()
+    assert len(actions) == 1
+    engine._apply_writes = True
+    engine._approved_actions = {action.zotero_item_key: action for action in actions}
+    row = engine._sync_one(replace(_make_item(), library=ZoteroLibrary(123)))
+    assert row.final_status == Status.STALE_PREVIEW.value
+    assert notion.create_calls == notion.attach_calls == 0
+
+
+@pytest.mark.parametrize("other_library", [ZoteroLibrary(), ZoteroLibrary(456)])
+def test_group_does_not_inherit_other_librarys_remote_ownership(
+    tmp_path, other_library
+):
+    from noteropdf.state_store import StateStore
+
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(
+        tmp_path, pdf=pdf, remote_files=[{"name": Path(pdf.absolute_path).name}]
+    )
+    signature = engine._snapshot_files_signature("page-1")[0]
+    item = replace(_make_item(), library=other_library)
+    state = StateStore(tmp_path / "state.sqlite3", acquire_lock=False)
+    engine.state = state
+    try:
+        state.upsert(
+            StateRecord(
+                item.sync_key,
+                "page-1",
+                pdf.absolute_path,
+                pdf.size,
+                pdf.mtime_ns,
+                sha256_file(Path(pdf.absolute_path)),
+                "2026-10-17T00:00:00+00:00",
+                Status.OK.value,
+                None,
+                *signature,
+            )
+        )
+        row = engine._sync_one(replace(_make_item(), library=ZoteroLibrary(123)))
+        assert row.final_status == Status.REMOTE_PDF_CONFLICT.value
+        assert state.get("groups/123/ABC123") is None
+        assert state.get(item.sync_key) is not None
+        assert notion.create_calls == notion.attach_calls == 0
+    finally:
+        state.close()
+
+
 def test_sync_one_reuploads_when_remote_file_name_drifted(tmp_path: Path):
     pdf = _make_pdf(tmp_path)
     record = StateRecord(
@@ -621,6 +684,7 @@ def test_doctor_reports_workspace_limit_and_group_libraries(tmp_path: Path):
         zotero=SimpleNamespace(
             data_dir=tmp_path / "zotero",
             storage_dir=tmp_path / "zotero" / "storage",
+            group_id=None,
         ),
         sync=SimpleNamespace(
             state_db_path=tmp_path / "state" / "noteropdf.sqlite3",
@@ -658,7 +722,7 @@ def test_doctor_reports_workspace_limit_and_group_libraries(tmp_path: Path):
 
     lines = engine.doctor()
 
-    assert any("group libraries are not synced" in line for line in lines)
+    assert any("Selected Zotero library: personal" in line for line in lines)
     assert any("local read-only API" in line for line in lines)
     assert any("Notion workspace upload limit: 123456 bytes." in line for line in lines)
     assert any("Notion data source is accessible: ds-1" in line for line in lines)

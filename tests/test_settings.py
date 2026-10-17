@@ -39,3 +39,27 @@ def test_settings_reject_unsupported_schema(tmp_path: Path):
             load_settings(store)
     finally:
         store.close()
+
+
+def test_group_selection_round_trip_and_switch_to_personal(tmp_path):
+    store = StateStore(tmp_path / "state.sqlite3", acquire_lock=False)
+    try:
+        assert load_settings(store).zotero_group_id is None
+        save_settings(store, LocalSettings(zotero_group_id=123))
+        assert load_settings(store).zotero_group_id == 123
+        save_settings(store, LocalSettings())
+        assert load_settings(store).zotero_group_id is None
+        assert "zotero_group_id" not in store.get_settings()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("raw", ["", "0", "-1", "group", "1.5"])
+def test_invalid_saved_group_never_defaults_to_personal(tmp_path, raw):
+    store = StateStore(tmp_path / "state.sqlite3", acquire_lock=False)
+    try:
+        store.update_settings({"zotero_group_id": raw})
+        with pytest.raises(ValueError):
+            load_settings(store)
+    finally:
+        store.close()

@@ -30,11 +30,13 @@ from .config import (
     validate_zotero_data_dir,
 )
 from .logging_setup import setup_run_logging
+from .models import ZoteroLibrary
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
 from .settings import LocalSettings, save_settings
 from .state_store import StateStore
 from .status import Status
 from .sync_engine import SyncEngine
+from .zotero_repo import ZoteroRepository
 
 _BLOCKING_SYNC_STATUSES = {
     Status.MULTIPLE_PDFS.value,
@@ -207,6 +209,27 @@ def _select_zotero_directory(existing: LocalSettings) -> Path:
             default = ""
 
 
+def _select_zotero_library(existing: LocalSettings) -> ZoteroLibrary:
+    libraries = ZoteroRepository.list_libraries()
+    if len(libraries) == 1 and existing.zotero_group_id is None:
+        print("[OK] Using Zotero: My Library")
+        return libraries[0]
+    if existing.zotero_group_id is not None and not any(
+        library.group_id == existing.zotero_group_id for library in libraries
+    ):
+        print("[WARN] The saved group is unavailable. Choose a library explicitly.")
+    labels = [
+        (
+            f"{library.name} (group {library.group_id})"
+            if library.group_id is not None
+            else library.name
+        )
+        + (" [saved]" if library.group_id == existing.zotero_group_id else "")
+        for library in libraries
+    ]
+    return libraries[_choose_number("Choose the Zotero library Notero manages", labels)]
+
+
 def _prompt_notion_token() -> str:
     while True:
         token = getpass.getpass("Paste the Notion personal access token: ").strip()
@@ -317,6 +340,7 @@ def _run_connect() -> int:
         print("[WARN] Local settings were unreadable and will be replaced.")
         existing = LocalSettings()
     zotero_dir = _select_zotero_directory(existing)
+    library = _select_zotero_library(existing)
     credential_store = _credential_store()
     previous_token = credential_store.load()
     token, new_token = _authorize_notion(previous_token)
@@ -350,6 +374,7 @@ def _run_connect() -> int:
     settings = replace(
         existing,
         zotero_data_dir=zotero_dir,
+        zotero_group_id=library.group_id,
         notion_data_source_id=target.data_source_id,
         pdf_property_id=pdf.id,
     )
@@ -472,6 +497,9 @@ def _run_sync(*, apply_without_prompt: bool) -> int:
         return 0
 
     apply_cfg = _load_ready_config()
+    if apply_cfg != preview_cfg:
+        print("[WARN] The connection changed after preview. Run the preview again.")
+        return 1
     engine = SyncEngine(apply_cfg)
     try:
         print("[INFO] Applying the confirmed uploads...")

@@ -65,6 +65,7 @@ class SyncEngine:
             self.zotero = ZoteroRepository(
                 storage_dir=cfg.zotero.storage_dir,
                 data_dir=cfg.zotero.data_dir,
+                group_id=cfg.zotero.group_id,
             )
             self.notion = NotionClient(
                 token=cfg.notion_token,
@@ -158,7 +159,11 @@ class SyncEngine:
                 f"- Zotero library can be read. Found {len(sample)} parent items."
             )
             notero_link_count = sum(1 for item in sample if item.notero_page_url)
-            lines.append("- Zotero group libraries are not synced in this release.")
+            lines.append(
+                "- Selected Zotero library: group."
+                if self.cfg.zotero.group_id is not None
+                else "- Selected Zotero library: personal."
+            )
         except Exception as exc:
             raise RuntimeError(
                 f"Zotero read-only snapshot check failed: {exc}"
@@ -268,13 +273,13 @@ class SyncEngine:
 
     def _build_match_cache(self, items: list[ZoteroItem]) -> dict[str, MatchResult]:
         """Resolve every target before writes and reject non-bijective plans."""
-        matches = {item.key: self._resolve_match(item) for item in items}
+        matches = {item.sync_key: self._resolve_match(item) for item in items}
         items_by_page: dict[str, list[str]] = {}
         for item in items:
-            match = matches[item.key]
+            match = matches[item.sync_key]
             if match.status == Status.OK and match.page_id:
                 page_key = NotionDataSourceSnapshot.page_id_key(match.page_id)
-                items_by_page.setdefault(page_key, []).append(item.key)
+                items_by_page.setdefault(page_key, []).append(item.sync_key)
 
         for item_keys in items_by_page.values():
             if len(item_keys) < 2:
@@ -437,12 +442,14 @@ class SyncEngine:
         if apply and approved_actions is None:
             raise ValueError("Applying a sync requires approved preview actions.")
 
-        # Materialize every local decision from one Zotero API response before any
+        # Materialize every local decision from one version-checked snapshot before any
         # Notion upload work.
         zotero = self._require_zotero()
         notion = self._require_notion()
         items = list(zotero.all_items())
-        selected_pdfs = {item.key: zotero.select_candidate_pdf(item) for item in items}
+        selected_pdfs = {
+            item.sync_key: zotero.select_candidate_pdf(item) for item in items
+        }
         zotero.close()
         self.zotero = None
 
@@ -465,7 +472,7 @@ class SyncEngine:
 
         rows: list[SyncRow] = []
         eligible_items = [
-            item for item in items if selected_pdfs[item.key][0] == Status.OK.value
+            item for item in items if selected_pdfs[item.sync_key][0] == Status.OK.value
         ]
         self._match_cache = self._build_match_cache(eligible_items)
         total = len(items)
@@ -473,7 +480,7 @@ class SyncEngine:
         for idx, item in enumerate(items, start=1):
             row = self._sync_one(
                 item,
-                selected_pdf=selected_pdfs[item.key],
+                selected_pdf=selected_pdfs[item.sync_key],
             )
             rows.append(row)
             self._logger.debug(
@@ -482,7 +489,7 @@ class SyncEngine:
                 total,
                 row.final_status,
                 row.action_taken,
-                item.key,
+                item.sync_key,
                 row.notion_page_id or "-",
                 item.title or "",
             )
@@ -490,7 +497,7 @@ class SyncEngine:
                 self._logger.warning(
                     "item=%s key=%s status=%s reason=%s",
                     idx,
-                    item.key,
+                    item.sync_key,
                     row.final_status,
                     row.error_message,
                 )
@@ -512,7 +519,7 @@ class SyncEngine:
         pdf_status, pdf, pdf_msg = selected_pdf
         if pdf_status != Status.OK.value:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=None,
@@ -529,14 +536,14 @@ class SyncEngine:
         try:
             match_cache = self._match_cache
             match = (
-                match_cache[item.key]
-                if match_cache is not None and item.key in match_cache
+                match_cache[item.sync_key]
+                if match_cache is not None and item.sync_key in match_cache
                 else self._resolve_match(item)
             )
         except NotionApiError as exc:
             code = self._normalize_status_code(exc.code, Status.ATTACH_FAILED)
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=None,
@@ -549,7 +556,7 @@ class SyncEngine:
 
         if match.status != Status.OK:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=None,
@@ -566,7 +573,7 @@ class SyncEngine:
         approved: PreviewAction | None = None
         approved_actions = self._approved_actions
         if approved_actions is not None:
-            approved = approved_actions.get(item.key)
+            approved = approved_actions.get(item.sync_key)
             if approved is not None:
                 try:
                     current_hash = self._get_cached_hash(pdf.absolute_path)
@@ -589,7 +596,7 @@ class SyncEngine:
             workspace_limit = self._require_notion().get_workspace_upload_limit_bytes()
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -608,7 +615,7 @@ class SyncEngine:
         )
         if pdf.size > max_supported:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -622,10 +629,10 @@ class SyncEngine:
             )
 
         try:
-            decision = self._needs_upload(item.key, match.page_id, pdf)
+            decision = self._needs_upload(item.sync_key, match.page_id, pdf)
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -639,7 +646,7 @@ class SyncEngine:
             )
         except OSError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -652,7 +659,7 @@ class SyncEngine:
 
         if decision.conflict_message is not None:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -669,7 +676,7 @@ class SyncEngine:
 
         if not needs_upload:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -681,8 +688,8 @@ class SyncEngine:
             )
 
         if self._preview_only():
-            self._preview_actions[item.key] = PreviewAction(
-                zotero_item_key=item.key,
+            self._preview_actions[item.sync_key] = PreviewAction(
+                zotero_item_key=item.sync_key,
                 notion_page_id=match.page_id,
                 pdf_absolute_path=pdf.absolute_path,
                 pdf_size=pdf.size,
@@ -691,7 +698,7 @@ class SyncEngine:
                 remote_files_signature=self._snapshot_files_signature(match.page_id),
             )
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -720,7 +727,7 @@ class SyncEngine:
             )
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -734,7 +741,7 @@ class SyncEngine:
             )
         if stale_message is not None:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -755,7 +762,7 @@ class SyncEngine:
             upload_id = notion.send_file_bytes(create, Path(pdf.absolute_path))
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -769,7 +776,7 @@ class SyncEngine:
             )
         except OSError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -792,7 +799,7 @@ class SyncEngine:
             )
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -806,7 +813,7 @@ class SyncEngine:
             )
         if stale_message is not None:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -826,7 +833,7 @@ class SyncEngine:
             )
         except NotionApiError as exc:
             return SyncRow(
-                zotero_item_key=item.key,
+                zotero_item_key=item.sync_key,
                 title=item.title,
                 zotero_uri=item.zotero_uri,
                 notion_page_id=match.page_id,
@@ -849,7 +856,7 @@ class SyncEngine:
             self._logger.error(
                 "Upload attached but Notion did not return a stable remote identity "
                 "for item=%s page=%s",
-                item.key,
+                item.sync_key,
                 match.page_id,
             )
             return self._state_save_failed_row(item, pdf, match)
@@ -859,7 +866,7 @@ class SyncEngine:
         try:
             self._require_state().upsert(
                 StateRecord(
-                    zotero_item_key=item.key,
+                    zotero_item_key=item.sync_key,
                     notion_page_id=match.page_id,
                     pdf_absolute_path=pdf.absolute_path,
                     pdf_size=pdf.size,
@@ -876,14 +883,14 @@ class SyncEngine:
         except (OSError, sqlite3.Error, RuntimeError) as exc:
             self._logger.error(
                 "Upload attached but local state update failed for item=%s page=%s: %s",
-                item.key,
+                item.sync_key,
                 match.page_id,
                 exc,
             )
             return self._state_save_failed_row(item, pdf, match)
 
         return SyncRow(
-            zotero_item_key=item.key,
+            zotero_item_key=item.sync_key,
             title=item.title,
             zotero_uri=item.zotero_uri,
             notion_page_id=match.page_id,
@@ -901,7 +908,7 @@ class SyncEngine:
         match: MatchResult,
     ) -> SyncRow:
         return SyncRow(
-            zotero_item_key=item.key,
+            zotero_item_key=item.sync_key,
             title=item.title,
             zotero_uri=item.zotero_uri,
             notion_page_id=match.page_id,
@@ -923,7 +930,7 @@ class SyncEngine:
         match: MatchResult,
     ) -> SyncRow:
         return SyncRow(
-            zotero_item_key=item.key,
+            zotero_item_key=item.sync_key,
             title=item.title,
             zotero_uri=item.zotero_uri,
             notion_page_id=match.page_id,

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from .models import CandidatePdf, ZoteroAttachment, ZoteroItem
+from .models import CandidatePdf, ZoteroAttachment, ZoteroItem, ZoteroLibrary
 
 LOCAL_API_BASE_URL = "http://127.0.0.1:23119/api"
 _LOCAL_API_TIMEOUT = (0.5, 10.0)
@@ -21,32 +23,42 @@ class _LocalApiProtocolError(RuntimeError):
     """The running local API answered but its response is unsafe to use."""
 
 
+@contextmanager
+def _local_api_session() -> Iterator[requests.Session]:
+    session = requests.Session()
+    # Local discovery must never be sent through a user-configured proxy.
+    session.trust_env = False
+    try:
+        yield session
+    except _LocalApiUnavailable as exc:
+        raise RuntimeError(
+            "Could not read Zotero through its local API. Open Zotero, then "
+            "enable ‘Allow other applications on this computer to communicate "
+            f"with Zotero’ in Settings > Advanced. Details: {exc}"
+        ) from exc
+    finally:
+        session.close()
+
+
 class ZoteroRepository:
-    def __init__(self, storage_dir: Path, data_dir: Path):
+    def __init__(
+        self, storage_dir: Path, data_dir: Path, *, group_id: int | None = None
+    ):
+        self._library = ZoteroLibrary(group_id)
         self._storage_dir = storage_dir.expanduser().resolve()
         self._data_dir = data_dir.expanduser().resolve()
         self._api_parent_items: list[ZoteroItem] = []
         self._api_attachments: dict[int, list[ZoteroAttachment]] = {}
-
-        session = requests.Session()
-        # Local discovery must never be sent through a user-configured proxy.
-        session.trust_env = False
-        try:
+        with _local_api_session() as session:
             self._load_local_api_snapshot(session)
-        except _LocalApiUnavailable as exc:
-            raise RuntimeError(
-                "Could not read Zotero through its local API. Open Zotero, then "
-                "enable ‘Allow other applications on this computer to communicate "
-                f"with Zotero’ in Settings > Advanced. Details: {exc}"
-            ) from exc
-        finally:
-            session.close()
 
     def close(self) -> None:
         """Release repository resources (the API snapshot is already in memory)."""
 
     @staticmethod
-    def _validate_response_version(response: requests.Response) -> None:
+    def _validate_response_version(
+        response: requests.Response, *, require_library_version: bool = True
+    ) -> None:
         api_version = (response.headers.get("Zotero-API-Version") or "").strip()
         if api_version != "3":
             raise _LocalApiProtocolError(
@@ -54,7 +66,7 @@ class ZoteroRepository:
                 f"version {api_version or 'unknown'}."
             )
         version = (response.headers.get("Last-Modified-Version") or "").strip()
-        if not version:
+        if require_library_version and not version:
             raise _LocalApiProtocolError(
                 "Zotero local API compatibility check failed: the response has "
                 "no Last-Modified-Version."
@@ -69,11 +81,14 @@ class ZoteroRepository:
                 "Zotero local API returned invalid JSON."
             ) from exc
 
+    @classmethod
     def _api_get(
-        self,
+        cls,
         session: requests.Session,
         path: str,
-    ) -> Any:
+        *,
+        require_library_version: bool = True,
+    ) -> requests.Response:
         try:
             response = session.get(
                 f"{LOCAL_API_BASE_URL}{path}",
@@ -82,24 +97,130 @@ class ZoteroRepository:
                     "Zotero-API-Version": "3",
                 },
                 timeout=_LOCAL_API_TIMEOUT,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise _LocalApiUnavailable(str(exc) or "connection failed") from exc
         if response.status_code == 403:
             raise _LocalApiUnavailable("the local API is disabled in Zotero")
+        if response.status_code == 404 and path.startswith("/groups/"):
+            raise _LocalApiUnavailable(
+                "the selected group library is unavailable. Synchronize it in "
+                "Zotero Desktop, or run `noteropdf connect` to choose a library"
+            )
         if response.status_code != 200:
             raise _LocalApiProtocolError(
                 f"Zotero local API returned HTTP {response.status_code}."
             )
-        self._validate_response_version(response)
-        return self._response_json(response)
+        cls._validate_response_version(
+            response, require_library_version=require_library_version
+        )
+        return response
+
+    @staticmethod
+    def _response_total(response: requests.Response) -> int:
+        raw = response.headers.get("Total-Results", "")
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise _LocalApiProtocolError(
+                "Zotero local API returned an invalid Total-Results count."
+            )
+        return int(raw)
+
+    @classmethod
+    def list_libraries(cls) -> list[ZoteroLibrary]:
+        """Discover local groups without reading any library's items or files."""
+        with _local_api_session() as session:
+            # Group metadata has no aggregate Last-Modified-Version in Zotero.
+            response = cls._api_get(
+                session, "/users/0/groups", require_library_version=False
+            )
+            groups = cls._response_json(response)
+            if not isinstance(groups, list) or len(groups) != cls._response_total(
+                response
+            ):
+                raise _LocalApiProtocolError(
+                    "Zotero local API returned an incomplete or invalid group list."
+                )
+            libraries = []
+            seen: set[int] = set()
+            for record in groups:
+                data = cls._api_data(record)
+                group_id = data.get("id")
+                name = data.get("name")
+                if (
+                    type(group_id) is not int
+                    or group_id <= 0
+                    or group_id in seen
+                    or not isinstance(name, str)
+                    or not name.strip()
+                ):
+                    raise _LocalApiProtocolError(
+                        "Zotero local API returned an invalid or duplicate group."
+                    )
+                seen.add(group_id)
+                libraries.append(ZoteroLibrary(group_id, name.strip()))
+        return [
+            ZoteroLibrary(),
+            *sorted(libraries, key=lambda library: library.group_id or 0),
+        ]
 
     def _load_local_api_snapshot(self, session: requests.Session) -> None:
-        items_raw = self._api_get(session, "/users/0/items")
-        if not isinstance(items_raw, list):
-            raise _LocalApiProtocolError(
-                "Zotero local API returned an unexpected item payload."
+        items_raw: list[Any] = []
+        snapshot_version: str | None = None
+        snapshot_total: int | None = None
+        seen_keys: set[str] = set()
+        while True:
+            response = self._api_get(
+                session,
+                f"{self._library.api_path}/items?limit=100&start={len(items_raw)}"
+                "&sort=dateAdded&direction=asc",
             )
+            page = self._response_json(response)
+            if not isinstance(page, list):
+                raise _LocalApiProtocolError(
+                    "Zotero local API returned an unexpected item payload."
+                )
+            total = self._response_total(response)
+            version = response.headers["Last-Modified-Version"]
+            if snapshot_version is None:
+                snapshot_version, snapshot_total = version, total
+            elif version != snapshot_version or total != snapshot_total:
+                raise _LocalApiProtocolError(
+                    "Zotero library changed during scanning. Run the preview again."
+                )
+            for record in page:
+                data = self._api_data(record)
+                key = str(data.get("key") or "").strip()
+                if not key or key in seen_keys:
+                    raise _LocalApiProtocolError(
+                        "Zotero local API returned an invalid or duplicate item key."
+                    )
+                seen_keys.add(key)
+                if self._library.group_id is not None:
+                    library = record.get("library")
+                    if (
+                        not isinstance(library, dict)
+                        or library.get("type") != "group"
+                        or type(library.get("id")) is not int
+                        or library["id"] != self._library.group_id
+                    ):
+                        raise _LocalApiProtocolError(
+                            "Zotero local API returned an item outside the selected group."
+                        )
+                elif (
+                    isinstance(record.get("library"), dict)
+                    and record["library"].get("type") == "group"
+                ):
+                    raise _LocalApiProtocolError(
+                        "Zotero local API returned a group item in the personal library."
+                    )
+            items_raw.extend(page)
+            if len(items_raw) == total:
+                break
+            if not page or len(items_raw) > total:
+                raise _LocalApiProtocolError(
+                    "Zotero local API returned an incomplete or inconsistent item list."
+                )
 
         parents, attachments = self._build_api_snapshot(items_raw)
         self._api_parent_items = parents
@@ -222,8 +343,9 @@ class ZoteroRepository:
                     item_id=item_id,
                     key=key,
                     title=str(data.get("title") or "").strip() or None,
-                    zotero_uri=f"zotero://select/library/items/{key}",
+                    zotero_uri=f"zotero://select/{self._library.select_path}/items/{key}",
                     notero_page_url=self._find_notero_link(attachments[item_id]),
+                    library=self._library,
                 )
             )
         return parents, attachments

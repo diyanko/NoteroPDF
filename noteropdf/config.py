@@ -26,6 +26,7 @@ class SetupRequired(RuntimeError):
 class ZoteroConfig:
     data_dir: Path
     storage_dir: Path
+    group_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +212,7 @@ def build_app_config(
         zotero=ZoteroConfig(
             data_dir=zotero_dir,
             storage_dir=zotero_dir / "storage",
+            group_id=settings.zotero_group_id,
         ),
         notion=NotionConfig(
             notion_version=LATEST_NOTION_VERSION,
