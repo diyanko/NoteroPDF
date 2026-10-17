@@ -73,13 +73,13 @@ def test_main_without_command_runs_sync(monkeypatch, tmp_path: Path):
         "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
     )
     assert main([]) == 0
-    assert calls == [{"apply_without_prompt": False}]
+    assert calls == [{"apply_without_prompt": False, "profile": None}]
 
 
 def test_main_reports_generic_cancellation(monkeypatch, tmp_path: Path, caplog):
     monkeypatch.setattr(
         "noteropdf.cli._run_connect",
-        lambda: (_ for _ in ()).throw(EOFError()),
+        lambda *_args: (_ for _ in ()).throw(EOFError()),
     )
     monkeypatch.setattr(
         "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
@@ -215,7 +215,7 @@ def test_interactive_sync_applies_only_actions_from_preview(monkeypatch):
             pass
 
     cfg = object()
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
     monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *args, **kwargs: True)
@@ -245,7 +245,7 @@ def test_noninteractive_sync_is_preview_only_without_apply(monkeypatch):
             pass
 
     cfg = object()
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
 
@@ -273,7 +273,7 @@ def test_apply_returns_failure_when_an_upload_was_not_completed(monkeypatch):
             pass
 
     cfg = object()
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
 
@@ -297,16 +297,18 @@ def test_preview_returns_failure_when_only_action_is_blocked(monkeypatch):
             pass
 
     cfg = object()
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
 
     assert _run_sync(apply_without_prompt=False) == 1
 
 
 def test_doctor_reports_incomplete_setup_without_requiring_config(monkeypatch, capsys):
-    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr(
+        "noteropdf.cli.load_local_settings", lambda **_kwargs: LocalSettings()
+    )
     monkeypatch.setattr("noteropdf.cli.detect_zotero_data_dir", lambda: None)
-    monkeypatch.setattr("noteropdf.cli._credential_store", lambda: object())
+    monkeypatch.setattr("noteropdf.cli._credential_store", lambda _profile: object())
     monkeypatch.setattr(
         "noteropdf.cli.resolve_access_token", lambda _store: ("", "missing")
     )
@@ -368,7 +370,9 @@ def test_validated_token_is_saved_before_database_selection(
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr(
+        "noteropdf.cli.load_local_settings", lambda **_kwargs: LocalSettings()
+    )
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
@@ -376,7 +380,7 @@ def test_validated_token_is_saved_before_database_selection(
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_library", lambda _settings: ZoteroLibrary()
     )
-    monkeypatch.setattr("noteropdf.cli._credential_store", FakeStore)
+    monkeypatch.setattr("noteropdf.cli._credential_store", lambda _profile: FakeStore())
     monkeypatch.setattr(
         "noteropdf.cli._authorize_notion",
         lambda _previous: (replacement, replacement),
@@ -426,7 +430,9 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         return "replacement-token", "replacement-token"
 
     pdf = NotionProperty("pdf-id", "NoteroPDF PDF", "files")
-    monkeypatch.setattr("noteropdf.cli.load_local_settings", LocalSettings)
+    monkeypatch.setattr(
+        "noteropdf.cli.load_local_settings", lambda **_kwargs: LocalSettings()
+    )
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
@@ -435,7 +441,7 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         "noteropdf.cli._select_zotero_library",
         lambda _settings: ZoteroLibrary(group_id),
     )
-    monkeypatch.setattr("noteropdf.cli._credential_store", Store)
+    monkeypatch.setattr("noteropdf.cli._credential_store", lambda _profile: Store())
     monkeypatch.setattr("noteropdf.cli._authorize_notion", authorize)
     monkeypatch.setattr("noteropdf.cli.NotionClient", FakeNotion)
     monkeypatch.setattr(
@@ -446,7 +452,10 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         "noteropdf.cli._select_pdf_property",
         lambda _notion, _target, _existing: pdf,
     )
-    monkeypatch.setattr("noteropdf.cli._save_connection", connections.append)
+    monkeypatch.setattr(
+        "noteropdf.cli._save_connection",
+        lambda settings, _profile: connections.append(settings),
+    )
 
     assert _run_connect() == 0
     assert authorize_calls == ["expired-token", None]
@@ -491,7 +500,7 @@ def test_only_personal_library_needs_no_selection(monkeypatch):
     assert _select_zotero_library(LocalSettings()) == ZoteroLibrary()
 
 
-@pytest.mark.parametrize("changed_field", ["zotero", "notion"])
+@pytest.mark.parametrize("changed_field", ["zotero", "notion", "sync", "token"])
 def test_changed_connection_blocks_apply_before_opening_engine(
     monkeypatch, changed_field
 ):
@@ -506,11 +515,14 @@ def test_changed_connection_blocks_apply_before_opening_engine(
         "test-token",
         "keyring",
     )
-    changed = (
-        replace(cfg, zotero=replace(cfg.zotero, group_id=123))
-        if changed_field == "zotero"
-        else replace(cfg, notion=replace(cfg.notion, pdf_property_id="other-pdf"))
-    )
+    changed = {
+        "zotero": replace(cfg, zotero=replace(cfg.zotero, group_id=123)),
+        "notion": replace(cfg, notion=replace(cfg.notion, pdf_property_id="other-pdf")),
+        "sync": replace(
+            cfg, sync=replace(cfg.sync, state_db_path=Path("other-profile.db"))
+        ),
+        "token": replace(cfg, notion_token="different-profile-token"),
+    }[changed_field]
     configs = iter([cfg, changed])
     engines = []
 
@@ -528,7 +540,14 @@ def test_changed_connection_blocks_apply_before_opening_engine(
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: next(configs))
+    selected_profiles = []
+
+    def load_config(profile):
+        selected_profiles.append(profile)
+        return next(configs)
+
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", load_config)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", Engine)
-    assert _run_sync(apply_without_prompt=True) == 1
+    assert _run_sync(apply_without_prompt=True, profile="lab") == 1
     assert engines == [cfg]
+    assert selected_profiles == ["lab", "lab"]

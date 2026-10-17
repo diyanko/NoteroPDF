@@ -76,6 +76,24 @@ and select its Notero database. Existing connections continue using the personal
 library until you change them. Sync history stays separate for each group, and
 an unavailable group stops the run instead of falling back to another library.
 
+To keep several connections, give each one a name:
+
+```bash
+noteropdf connect --profile lab
+noteropdf sync --profile lab
+noteropdf doctor --profile lab
+```
+
+Each named connection remembers its own Zotero library, Notion database, PDF
+property, token, and sync history. Tokens stay in separate accounts in your
+operating system's credential store. You can use a different Notion workspace
+for each connection. Every command runs only the connection you selected.
+
+Leaving out `--profile` (or using `--profile default`) keeps your existing
+connection, token, and history. New names require `connect` first; a misspelled
+name stops sync instead of using another connection. Names use 1–32 lowercase
+letters, digits, or hyphens, start with a letter, and end with a letter or digit.
+
 ## Commands
 
 | Command | Purpose |
@@ -88,6 +106,7 @@ an unavailable group stops the run instead of falling back to another library.
 | `noteropdf --version` | Show the installed version. |
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
+Add `--profile NAME` to any command to use a named connection.
 
 ## Safe by Design
 
