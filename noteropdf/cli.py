@@ -215,10 +215,26 @@ def _stdin_interactive() -> bool:
     return bool(getattr(sys.stdin, "isatty", lambda: False)())
 
 
+class _SetupBack(Exception):
+    pass
+
+
+class _SetupCancelled(Exception):
+    pass
+
+
+def _setup_input(value: str) -> str:
+    if value.casefold() in {"cancel", "quit", "q"}:
+        raise _SetupCancelled
+    if value.casefold() == "back":
+        raise _SetupBack
+    return value
+
+
 def _prompt_value(prompt: str, *, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     while True:
-        value = input(f"{prompt}{suffix}: ").strip()
+        value = _setup_input(input(f"{prompt}{suffix}: ").strip())
         value = value or default
         if value:
             return value
@@ -228,7 +244,7 @@ def _prompt_value(prompt: str, *, default: str = "") -> str:
 def _prompt_yes_no(prompt: str, *, default_yes: bool = False) -> bool:
     choices = "[Y/n]" if default_yes else "[y/N]"
     while True:
-        value = input(f"{prompt} {choices}: ").strip().lower()
+        value = _setup_input(input(f"{prompt} {choices}: ").strip().lower())
         if not value:
             return default_yes
         if value in {"y", "yes"}:
@@ -255,7 +271,11 @@ def _choose_number(prompt: str, choices: list[str]) -> int:
         print("Enter a number from the list.")
 
 
-def _credential_store(profile: str | None = None) -> CredentialStore:
+def _credential_store(
+    profile: str | None = None, *, credential_id: str | None = None
+) -> CredentialStore:
+    if credential_id is not None:
+        return CredentialStore(profile=profile, credential_id=credential_id)
     return CredentialStore(profile=profile)
 
 
@@ -299,9 +319,13 @@ def _select_zotero_directory(existing: LocalSettings) -> Path:
             default = ""
 
 
-def _select_zotero_library(existing: LocalSettings) -> ZoteroLibrary:
+def _select_zotero_library(
+    existing: LocalSettings, *, revisit: bool = False
+) -> ZoteroLibrary:
     libraries = ZoteroRepository.list_libraries()
     if len(libraries) == 1 and existing.zotero_group_id is None:
+        if revisit:
+            raise _SetupBack
         print("[OK] Using Zotero: My Library")
         return libraries[0]
     if existing.zotero_group_id is not None and not any(
@@ -322,7 +346,9 @@ def _select_zotero_library(existing: LocalSettings) -> ZoteroLibrary:
 
 def _prompt_notion_token() -> str:
     while True:
-        token = getpass.getpass("Paste the Notion personal access token: ").strip()
+        token = _setup_input(
+            getpass.getpass("Paste the Notion personal access token: ").strip()
+        )
         if token:
             return token
         print("Please paste a token.")
@@ -347,7 +373,7 @@ def _authorize_notion(previous_token: str | None) -> tuple[str, str | None]:
     return token, token
 
 
-def _select_target(notion: NotionClient) -> NotionTarget:
+def _select_target(notion: NotionClient, *, revisit: bool = False) -> NotionTarget:
     targets = notion.list_accessible_data_sources()
     if not targets:
         raise SetupRequired(
@@ -355,6 +381,8 @@ def _select_target(notion: NotionClient) -> NotionTarget:
             "the token belongs to the workspace containing the Notero database."
         )
     if len(targets) == 1:
+        if revisit:
+            raise _SetupBack
         print(f"[OK] Using Notion database: {_target_choice_label(targets[0])}")
         return targets[0]
     if not _stdin_interactive():
@@ -379,6 +407,8 @@ def _select_pdf_property(
     notion: NotionClient,
     target: NotionTarget,
     existing: LocalSettings | None = None,
+    *,
+    revisit: bool = False,
 ) -> NotionProperty:
     if (
         existing is not None
@@ -389,15 +419,23 @@ def _select_pdf_property(
             target.data_source_id, existing.pdf_property_id
         )
         if connected is not None and connected.type == "files":
+            if revisit:
+                raise _SetupBack
             return connected
 
     pdf = notion.find_files_property(target.data_source_id, "NoteroPDF PDF")
+    if pdf is not None and revisit:
+        raise _SetupBack
     if pdf is None:
         if not _stdin_interactive():
             raise SetupRequired(
                 "The selected database has no dedicated 'NoteroPDF PDF' files "
                 "property. Run connect in a terminal to create it."
             )
+        print(
+            "Creating the property changes Notion immediately. "
+            "Cancelling setup later leaves that property in place."
+        )
         if not _prompt_yes_no(
             "Create a dedicated Notion files property named 'NoteroPDF PDF' in "
             f"{_target_choice_label(target)}?",
@@ -419,57 +457,136 @@ def _save_connection(settings: LocalSettings, profile: str | None = None) -> Non
         store.close()
 
 
+def _review_connection(
+    library: ZoteroLibrary, target: NotionTarget, pdf: NotionProperty
+) -> bool:
+    print("\nReview connection")
+    print(f"- Zotero library: {library.name}")
+    print(f"- Notion destination: {target.label} -> {pdf.name}")
+    while True:
+        answer = _prompt_value(
+            "Save this connection? yes / edit / cancel", default="yes"
+        )
+        if answer.casefold() in {"yes", "y"}:
+            return True
+        if answer.casefold() in {"edit", "no", "n"}:
+            return False
+        print("Enter yes to save, edit to start again, or cancel to leave setup.")
+
+
 def _run_connect(profile: str | None = None) -> int:
     if not _stdin_interactive():
         raise SetupRequired("Connect requires an interactive terminal.")
-
     profile = normalize_profile(profile)
     print(f"NoteroPDF connection: {profile or 'default'}")
+    print("At any prompt: back returns to the previous step; cancel leaves setup.")
+    print("Your saved connection changes only after you review and save it.")
     try:
         existing = load_local_settings(profile=profile, allow_missing_profile=True)
     except ValueError:
-        print("[WARN] Local settings were unreadable and will be replaced.")
+        print(
+            "[WARN] Local settings were unreadable and will be replaced only when saved."
+        )
         existing = LocalSettings()
-    zotero_dir = _select_zotero_directory(existing)
-    library = _select_zotero_library(existing)
-    credential_store = _credential_store(profile)
-    previous_token = credential_store.load()
-    token, new_token = _authorize_notion(previous_token)
-
-    notion = NotionClient(token=token, notion_version=LATEST_NOTION_VERSION)
-    try:
-        try:
-            notion.ping()
-        except NotionApiError as exc:
-            can_replace_saved_token = (
-                exc.status_code == 401
-                and previous_token is not None
-                and new_token is None
-                and _stdin_interactive()
-            )
-            if not can_replace_saved_token:
-                raise
-            notion.close()
-            print("[WARN] The saved Notion token was rejected; paste a replacement.")
-            token, new_token = _authorize_notion(None)
-            notion = NotionClient(token=token, notion_version=LATEST_NOTION_VERSION)
-            notion.ping()
-        if new_token is not None:
-            credential_store.save(new_token)
-            print("[OK] Notion token saved in the operating-system credential store.")
-        target = _select_target(notion)
-        pdf = _select_pdf_property(notion, target, existing)
-    finally:
-        notion.close()
-
-    settings = replace(
-        existing,
-        zotero_data_dir=zotero_dir,
-        zotero_group_id=library.group_id,
-        notion_data_source_id=target.data_source_id,
-        pdf_property_id=pdf.id,
+    credential_store = (
+        _credential_store(profile, credential_id=existing.notion_credential_id)
+        if existing.notion_credential_id is not None
+        else _credential_store(profile)
     )
-    _save_connection(settings, profile)
+    previous_token = credential_store.load()
+    saved_token = previous_token
+    draft = existing
+    step = 0
+    revisiting = False
+    notion = None
+    new_token = None
+    staged_id = None
+    committed = False
+    try:
+        while step < 6:
+            try:
+                if step == 0:
+                    zotero_dir = _select_zotero_directory(draft)
+                    draft = replace(draft, zotero_data_dir=zotero_dir)
+                elif step == 1:
+                    library = (
+                        _select_zotero_library(draft, revisit=True)
+                        if revisiting
+                        else _select_zotero_library(draft)
+                    )
+                    draft = replace(draft, zotero_group_id=library.group_id)
+                elif step == 2:
+                    if notion is not None:
+                        notion.close()
+                    token, new_token = _authorize_notion(previous_token)
+                    notion = NotionClient(
+                        token=token, notion_version=LATEST_NOTION_VERSION
+                    )
+                    try:
+                        notion.ping()
+                    except NotionApiError as exc:
+                        if exc.status_code != 401:
+                            raise
+                        print(
+                            "[WARN] Notion rejected this token. Try a replacement, back, or cancel."
+                        )
+                        previous_token = None
+                        continue
+                elif step == 3:
+                    assert notion is not None
+                    target = (
+                        _select_target(notion, revisit=True)
+                        if revisiting
+                        else _select_target(notion)
+                    )
+                elif step == 4:
+                    assert notion is not None
+                    pdf = (
+                        _select_pdf_property(notion, target, draft, revisit=True)
+                        if revisiting
+                        else _select_pdf_property(notion, target, draft)
+                    )
+                elif not _review_connection(library, target, pdf):
+                    step = 0
+                    continue
+                revisiting = False
+                step += 1
+            except _SetupBack:
+                # Walk past automatic choices until a real prompt can change
+                # the previous decision, rather than bouncing forward again.
+                revisiting = True
+                step = max(0, step - 1)
+                print("[INFO] Returned to the previous setup step.")
+        if new_token is not None and new_token != saved_token:
+            staged_id = credential_store.stage(new_token)
+        settings = replace(
+            draft,
+            notion_data_source_id=target.data_source_id,
+            pdf_property_id=pdf.id,
+            notion_credential_id=staged_id or existing.notion_credential_id,
+        )
+        _save_connection(settings, profile)
+        committed = True
+    except _SetupCancelled:
+        print("[OK] Setup cancelled. The saved connection was not changed.")
+        return 0
+    finally:
+        if notion is not None:
+            notion.close()
+        if staged_id is not None and not committed:
+            # An interruption can arrive just after SQLite commits. Never delete
+            # a generation that the saved connection may already reference.
+            try:
+                active = load_local_settings(
+                    profile=profile, allow_missing_profile=True
+                )
+                if active.notion_credential_id != staged_id:
+                    credential_store.discard(staged_id)
+            except (CredentialStoreError, OSError, sqlite3.Error, ValueError):
+                print(
+                    "[WARN] An unused token may remain in the credential store. "
+                    "No previously saved token was removed."
+                )
     print(f"[OK] PDF destination: {target.label} -> {pdf.name}")
     command = f"noteropdf sync --profile {profile}" if profile else "noteropdf"
     print(f"[NEXT] Run `{command}` to preview your first sync.")
@@ -477,7 +594,8 @@ def _run_connect(profile: str | None = None) -> int:
 
 
 def _load_ready_config(profile: str | None = None) -> AppConfig:
-    return load_app_config(credential_store=_credential_store(profile), profile=profile)
+    # Resolve settings and their credential reference from one snapshot.
+    return load_app_config(profile=profile)
 
 
 def _run_pdf(
@@ -553,7 +671,7 @@ _UPLOAD_REASONS = {
 _ATTENTION_REASONS = {
     "NO_PDF": "No local PDF is available. Download or attach a PDF in Zotero.",
     "MULTIPLE_PDFS": "Several PDFs are available. Choose the intended PDF explicitly before syncing.",
-    "INVALID_PDF_SELECTION": "The saved PDF choice is unavailable or moved. Choose it again.",
+    "INVALID_PDF_SELECTION": "The saved PDF choice is unavailable or moved. Run `noteropdf pdf` to choose it again.",
     "BROKEN_ATTACHMENT_PATH": "The PDF cannot be read. Check that it is downloaded in Zotero.",
     "NO_NOTION_MATCH": "No accessible exact Notero page link was found. Sync this item with Notero first.",
     "MULTIPLE_NOTION_MATCHES": "Several items point to one Notion page. Correct their Notero links.",
@@ -641,7 +759,8 @@ def _print_summary(
             reason = _ATTENTION_REASONS.get(
                 row.final_status, "Could not process this item safely. Run doctor."
             )
-            print(f"  - {_item_label(row)}: {recovery_guidance(reason, profile)}")
+            guidance = recovery_guidance(reason, profile, item_key=row.zotero_item_key)
+            print(f"  - {_item_label(row)}: {guidance}")
         if len(attention_rows) > limit:
             print(
                 f"  - ...and {len(attention_rows) - limit} more; use `sync --details` to see every item"
@@ -790,7 +909,12 @@ def _run_doctor(profile: str | None = None) -> int:
             ready = False
 
     try:
-        token, token_source = resolve_access_token(_credential_store(profile))
+        credentials = (
+            _credential_store(profile, credential_id=settings.notion_credential_id)
+            if settings.notion_credential_id is not None
+            else _credential_store(profile)
+        )
+        token, token_source = resolve_access_token(credentials)
     except CredentialStoreError as exc:
         print(
             f"- [FAIL] Notion credentials cannot be read: {recovery_guidance(str(exc), profile)}"
@@ -1066,6 +1190,9 @@ def main(argv: list[str] | None = None) -> int:
         elif isinstance(exc, SetupRequired):
             logger.info("[NEXT] Run `%s` in a terminal.", _connect_command(profile))
         return 2
+    except (_SetupCancelled, _SetupBack):
+        logger.info("Cancelled. Run connect to change your saved connection.")
+        return 0
     except (KeyboardInterrupt, EOFError):
         logger.warning("Cancelled. Any operation already completed remains in place.")
         return 130

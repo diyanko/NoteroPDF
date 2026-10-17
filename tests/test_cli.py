@@ -358,7 +358,7 @@ def test_authorize_notion_can_reuse_saved_token(monkeypatch):
     assert _authorize_notion("saved-token") == ("saved-token", None)
 
 
-def test_validated_token_is_saved_before_database_selection(
+def test_replacement_token_is_not_saved_before_database_selection(
     monkeypatch, tmp_path: Path
 ):
     previous = "old-personal-token"
@@ -407,7 +407,7 @@ def test_validated_token_is_saved_before_database_selection(
     with pytest.raises(ValueError, match="selection cancelled"):
         _run_connect()
 
-    assert saved == [replacement]
+    assert saved == []
 
 
 @pytest.mark.parametrize("group_id", [None, 123])
@@ -422,8 +422,9 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         def load(self):
             return "expired-token"
 
-        def save(self, token):
+        def stage(self, token):
             saved.append(token)
+            return "a" * 32
 
     class FakeNotion:
         def __init__(self, *, token, **_kwargs):
@@ -470,6 +471,7 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         lambda settings, _profile: connections.append(settings),
     )
 
+    monkeypatch.setattr("noteropdf.cli._review_connection", lambda *args: True)
     assert _run_connect() == 0
     assert authorize_calls == ["expired-token", None]
     assert saved == ["replacement-token"]

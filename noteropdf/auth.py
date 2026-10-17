@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
-from .profiles import normalize_profile
+from .profiles import normalize_profile, validate_credential_id
 
 NOTION_TOKEN_PAGE_URL = "https://www.notion.so/developers/tokens"
 KEYRING_SERVICE = "noteropdf"
@@ -23,10 +24,14 @@ class CredentialStore:
         username: str = KEYRING_USERNAME,
         keyring_module: Any | None = None,
         profile: str | None = None,
+        credential_id: str | None = None,
     ):
         profile = normalize_profile(profile)
         self._service = service
         self._username = f"{username}:profile:{profile}" if profile else username
+        self._base_username = self._username
+        if credential_id is not None:
+            self._username += f":credential:{validate_credential_id(credential_id)}"
         self._keyring = keyring_module
 
     def _keyring_module(self) -> Any:
@@ -132,6 +137,40 @@ class CredentialStore:
                 "credential store. Make sure Keychain, Credential Manager, or "
                 "Secret Service/KWallet is available."
             ) from exc
+
+    def stage(self, token: str) -> str:
+        """Save a new generation without changing the active credential account."""
+        credential_id = uuid4().hex
+        try:
+            self._generation(credential_id).save(token)
+        except BaseException:
+            try:
+                self.discard(credential_id)
+            except CredentialStoreError:
+                pass
+            raise
+        return credential_id
+
+    def discard(self, credential_id: str) -> None:
+        """Remove only an uncommitted generation created by this setup run."""
+        staged = self._generation(credential_id)
+        try:
+            staged._validated_keyring_module().delete_password(
+                staged._service, staged._username
+            )
+        except Exception as exc:
+            raise CredentialStoreError(
+                "Could not remove the unused token from the credential store. "
+                "The previous connection remains selected."
+            ) from exc
+
+    def _generation(self, credential_id: str) -> CredentialStore:
+        return CredentialStore(
+            service=self._service,
+            username=self._base_username,
+            keyring_module=self._keyring,
+            credential_id=credential_id,
+        )
 
 
 def resolve_access_token(store: CredentialStore) -> tuple[str, str]:
