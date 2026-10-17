@@ -107,6 +107,8 @@ letters, digits, or hyphens, start with a letter, and end with a letter or digit
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
 Add `--profile NAME` to any command to use a named connection.
+Recovery instructions keep that connection selected, so reconnecting after an
+expired token repairs the connection you were using.
 
 ## Safe by Design
 

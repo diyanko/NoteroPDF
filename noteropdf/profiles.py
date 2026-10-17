@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 
 
 def validate_profile_name(name: str) -> str:
@@ -17,3 +18,18 @@ def normalize_profile(name: str | None) -> str | None:
     if name is None:
         return None
     return None if validate_profile_name(name) == "default" else name
+
+
+def connect_command(profile: str | None = None) -> str:
+    """Build a copyable reconnect command for the selected connection."""
+    profile = normalize_profile(profile)
+    arguments = ["noteropdf", "connect"]
+    if profile is not None:
+        arguments.extend(("--profile", profile))
+    return shlex.join(arguments)
+
+
+def recovery_guidance(message: str, profile: str | None = None) -> str:
+    """Scope the standard reconnect instruction at the presentation boundary."""
+    command = connect_command(profile)
+    return message.replace("`noteropdf connect`", f"`{command}`")

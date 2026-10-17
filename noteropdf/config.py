@@ -10,7 +10,7 @@ from pathlib import Path
 from platformdirs import user_data_path, user_log_path
 
 from .auth import CredentialStore, resolve_access_token
-from .profiles import normalize_profile
+from .profiles import connect_command, normalize_profile
 from .settings import LocalSettings, load_settings
 from .state_store import StateStore
 from .util import unescape_js_string_literal
@@ -212,7 +212,7 @@ def load_local_settings(
             return LocalSettings()
         raise SetupRequired(
             f"Profile '{profile}' has not been connected. "
-            f"Run `noteropdf connect --profile {profile}` in a terminal."
+            f"Run `{connect_command(profile)}` in a terminal."
         )
     store = StateStore(db_path, acquire_lock=False)
     try:
@@ -230,7 +230,7 @@ def build_app_config(
     profile: str | None = None,
 ) -> AppConfig:
     profile = normalize_profile(profile)
-    connect = "noteropdf connect" + (f" --profile {profile}" if profile else "")
+    connect = connect_command(profile)
     if not settings.zotero_data_dir:
         raise SetupRequired(f"Zotero has not been connected yet. Run `{connect}`.")
     if not settings.notion_data_source_id or not settings.pdf_property_id:
