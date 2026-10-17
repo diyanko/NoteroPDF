@@ -74,7 +74,12 @@ def test_main_without_command_runs_sync(monkeypatch, tmp_path: Path):
     )
     assert main([]) == 0
     assert calls == [
-        {"apply_without_prompt": False, "scope": SyncScope(), "profile": None}
+        {
+            "apply_without_prompt": False,
+            "details": False,
+            "scope": SyncScope(),
+            "profile": None,
+        }
     ]
 
 
@@ -220,7 +225,7 @@ def test_interactive_sync_applies_only_actions_from_preview(monkeypatch, scope):
         def close(self):
             pass
 
-    cfg = object()
+    cfg = SimpleNamespace(zotero=SimpleNamespace(group_id=None))
     monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
@@ -251,7 +256,7 @@ def test_noninteractive_sync_is_preview_only_without_apply(monkeypatch):
         def close(self):
             pass
 
-    cfg = object()
+    cfg = SimpleNamespace(zotero=SimpleNamespace(group_id=None))
     monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
@@ -279,7 +284,7 @@ def test_apply_returns_failure_when_an_upload_was_not_completed(monkeypatch):
         def close(self):
             pass
 
-    cfg = object()
+    cfg = SimpleNamespace(zotero=SimpleNamespace(group_id=None))
     monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
@@ -303,7 +308,7 @@ def test_preview_returns_failure_when_only_action_is_blocked(monkeypatch):
         def close(self):
             pass
 
-    cfg = object()
+    cfg = SimpleNamespace(zotero=SimpleNamespace(group_id=None))
     monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr("noteropdf.cli.SyncEngine", FakeEngine)
 
@@ -561,6 +566,92 @@ def test_changed_connection_blocks_apply_before_opening_engine(
     assert selected_profiles == ["lab", "lab"]
 
 
+@pytest.mark.parametrize(
+    "group_id, source",
+    [(None, "personal Zotero library"), (123, "selected Zotero group library")],
+)
+def test_summary_explains_context_without_private_row_metadata(
+    capsys, group_id, source
+):
+    from dataclasses import replace
+
+    row = replace(
+        _row("preview_upload:changed"),
+        title="Private paper title",
+        local_pdf_path="/private/research/Private paper.pdf",
+        notion_page_id="secret-page-id",
+        notion_page_url="https://notion.so/secret-page-id",
+        error_message="private error detail",
+    )
+    cfg = SimpleNamespace(zotero=SimpleNamespace(group_id=group_id))
+    _print_summary([row], preview=True, cfg=cfg)
+    output = capsys.readouterr().out
+    assert f"Source: {source}" in output
+    assert "Destination: connected Notion database, dedicated PDF files field" in output
+    assert "Item ABC: Update the PDF previously uploaded by NoteroPDF" in output
+    assert "Preview only. Notion has not changed." in output
+    for private in (
+        row.title,
+        row.local_pdf_path,
+        row.notion_page_id,
+        row.notion_page_url,
+        row.error_message,
+    ):
+        assert private not in output
+
+
+def test_summary_is_bounded_and_details_show_every_item(capsys):
+    from dataclasses import replace
+
+    rows = [
+        replace(_row("preview_upload:missing_remote_pdf"), zotero_item_key=f"ITEM{i}")
+        for i in range(30)
+    ]
+    rows.append(
+        replace(_row("quick_fingerprint_match", "UNCHANGED"), zotero_item_key="CURRENT")
+    )
+    _print_summary(rows, preview=True)
+    output = capsys.readouterr().out
+    assert "PDFs to upload: 30" in output
+    assert "...and 25 more" in output
+    assert "Item ITEM4:" in output
+    assert "Item ITEM5:" not in output
+    assert "Item CURRENT:" not in output
+    _print_summary(rows, preview=True, details=True)
+    output = capsys.readouterr().out
+    assert "Item ITEM29:" in output
+    assert "Item CURRENT: The existing PDF is current" in output
+    assert "...and" not in output
+
+
+def test_summary_has_actionable_skips_and_never_echoes_raw_errors_or_controls(capsys):
+    from dataclasses import replace
+
+    rows = [
+        replace(
+            _row("skip", "MULTIPLE_PDFS"),
+            zotero_item_key="groups/123/ITEM",
+            error_message="Private diagnostic /home/person/paper.pdf",
+        ),
+        replace(
+            _row("skip", "UNRECOGNIZED_SECRET_STATUS"), zotero_item_key="\x1b[31mBAD"
+        ),
+        _row("skip:remote_pdf_not_managed", "REMOTE_PDF_CONFLICT"),
+    ]
+    _print_summary(rows, preview=True, details=True)
+    output = capsys.readouterr().out
+    assert "Item ITEM: Several PDFs are available" in output
+    assert "nothing was replaced" in output
+    assert "Run `noteropdf doctor`" in output
+    assert "Private diagnostic" not in output
+    assert "UNRECOGNIZED_SECRET_STATUS" not in output
+    assert "\x1b" not in output
+
+
+def test_parser_accepts_details_for_sync():
+    assert _build_parser().parse_args(["sync", "--details"]).details is True
+
+
 def test_pdf_command_inspects_validates_saves_and_clears_without_notion(
     monkeypatch, tmp_path, capsys
 ):
@@ -647,6 +738,7 @@ def test_sync_filters_are_repeatable_and_passed_to_workflow(monkeypatch, tmp_pat
     assert calls == [
         {
             "apply_without_prompt": True,
+            "details": False,
             "profile": "lab",
             "scope": SyncScope(("ABCD1234", "EFGH5678"), ("IJKL9012", "MNOP3456")),
         }
@@ -663,7 +755,10 @@ def test_sync_filter_keys_reject_invalid_input_before_setup(flag, key):
     assert exc.value.code == 2
 
 
-def test_noninteractive_retry_command_preserves_profile_and_scope(monkeypatch, capsys):
+@pytest.mark.parametrize("details", [False, True])
+def test_noninteractive_retry_command_preserves_profile_and_scope(
+    monkeypatch, capsys, details
+):
     class Engine:
         def __init__(self, _cfg):
             pass
@@ -679,7 +774,10 @@ def test_noninteractive_retry_command_preserves_profile_and_scope(monkeypatch, c
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda profile: object())
+    monkeypatch.setattr(
+        "noteropdf.cli._load_ready_config",
+        lambda profile: SimpleNamespace(zotero=SimpleNamespace(group_id=None)),
+    )
     monkeypatch.setattr("noteropdf.cli.SyncEngine", Engine)
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: False)
     assert (
@@ -687,11 +785,14 @@ def test_noninteractive_retry_command_preserves_profile_and_scope(monkeypatch, c
             apply_without_prompt=False,
             profile="lab",
             scope=SyncScope(("COLL1234",), ("ITEM1234",)),
+            details=details,
         )
         == 2
     )
     assert (
-        "noteropdf sync --profile lab --collection-key COLL1234 --item-key ITEM1234 --apply"
+        "noteropdf sync --profile lab"
+        + (" --details" if details else "")
+        + " --collection-key COLL1234 --item-key ITEM1234 --apply"
         in capsys.readouterr().out
     )
 
@@ -716,3 +817,31 @@ def test_pdf_command_routes_named_profile_before_or_after_command(
     )
     assert main(arguments) == 0
     assert calls == [(("ITEM", "PDF"), {"clear": False, "profile": "lab"})]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--profile", "lab", "sync", "--details", "--item-key", "ABCD1234"],
+        ["sync", "--details", "--item-key", "ABCD1234", "--profile", "lab"],
+    ],
+)
+def test_sync_routes_details_with_named_profile_and_scope(
+    monkeypatch, tmp_path, arguments
+):
+    calls = []
+    monkeypatch.setattr(
+        "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli._run_sync", lambda **kwargs: calls.append(kwargs) or 0
+    )
+    assert main(arguments) == 0
+    assert calls == [
+        {
+            "apply_without_prompt": False,
+            "details": True,
+            "profile": "lab",
+            "scope": SyncScope(item_keys=("ABCD1234",)),
+        }
+    ]

@@ -233,7 +233,14 @@ def test_main_dispatches_the_selected_profile(monkeypatch, isolated_paths, comma
         )
     assert cli.main([command, "--profile", "lab"]) == 0
     assert calls == (
-        [{"apply_without_prompt": False, "profile": "lab", "scope": SyncScope()}]
+        [
+            {
+                "apply_without_prompt": False,
+                "details": False,
+                "profile": "lab",
+                "scope": SyncScope(),
+            }
+        ]
         if command == "sync"
         else ["lab"]
     )
@@ -351,7 +358,10 @@ def test_sync_row_recovery_keeps_selected_connection(
     monkeypatch.setattr(
         cli,
         "_load_ready_config",
-        lambda selected_profile: selected.append(selected_profile) or object(),
+        lambda selected_profile: (
+            selected.append(selected_profile)
+            or SimpleNamespace(zotero=SimpleNamespace(group_id=None))
+        ),
     )
     monkeypatch.setattr(cli, "SyncEngine", Engine)
     arguments = ["sync"] + (["--profile", profile] if profile else [])
@@ -359,7 +369,7 @@ def test_sync_row_recovery_keeps_selected_connection(
     assert selected == [profile]
     output = capsys.readouterr().out
     expected = "noteropdf connect --profile lab" if profile else "noteropdf connect"
-    assert f"Run `{expected}` and paste a valid personal access token" in output
+    assert f"`{expected}`" in output
     if profile:
         assert "`noteropdf connect`" not in output
 
