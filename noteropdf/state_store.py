@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -154,6 +155,18 @@ class StateStore:
         if not row:
             return None
         return StateRecord(*row)
+
+    def get_source_manifest(self, scope: str) -> dict:
+        raw = self.get_settings().get(f"source_manifest:{scope}")
+        if raw is None:
+            return {}
+        manifest = json.loads(raw)
+        if not isinstance(manifest, dict):
+            raise TypeError("Stored supporting-file history is invalid.")
+        return manifest
+
+    def save_source_manifest(self, scope: str, manifest: dict) -> None:
+        self.update_settings({f"source_manifest:{scope}": json.dumps(manifest)})
 
     def upsert(self, rec: StateRecord) -> None:
         conn = self._connection

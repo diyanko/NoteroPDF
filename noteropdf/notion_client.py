@@ -541,7 +541,13 @@ class NotionClient:
             )
         return self._request("POST", "/file_uploads", json_body=body)
 
-    def send_file_bytes(self, create_payload: dict[str, Any], pdf_path: Path) -> str:
+    def send_file_bytes(
+        self,
+        create_payload: dict[str, Any],
+        pdf_path: Path,
+        *,
+        content_type: str = "application/pdf",
+    ) -> str:
         upload_obj = create_payload.get("file_upload") or create_payload
         upload_id = upload_obj.get("id") or create_payload.get("id")
         if not isinstance(upload_id, str) or not upload_id.strip():
@@ -566,11 +572,19 @@ class NotionClient:
             complete_url
         )
         if is_multi_part:
-            self._send_multi_part_bytes(upload_url, upload_id, pdf_path, upload_timeout)
+            self._send_multi_part_bytes(
+                upload_url,
+                upload_id,
+                pdf_path,
+                upload_timeout,
+                content_type=content_type,
+            )
             self.complete_file_upload(upload_id, complete_url=complete_url)
             return upload_id
 
-        self._send_single_part_bytes(upload_url, pdf_path, upload_timeout)
+        self._send_single_part_bytes(
+            upload_url, pdf_path, upload_timeout, content_type=content_type
+        )
         return upload_id
 
     def _auth_headers(self) -> dict[str, str]:
@@ -591,7 +605,12 @@ class NotionClient:
         return safe_name
 
     def _send_single_part_bytes(
-        self, upload_url: str, pdf_path: Path, upload_timeout: int
+        self,
+        upload_url: str,
+        pdf_path: Path,
+        upload_timeout: int,
+        *,
+        content_type: str = "application/pdf",
     ) -> None:
         filename = self.normalize_attachment_filename(pdf_path.name)
 
@@ -600,7 +619,7 @@ class NotionClient:
                 return self._session.post(
                     upload_url,
                     headers=self._auth_headers(),
-                    files={"file": (filename, f, "application/pdf")},
+                    files={"file": (filename, f, content_type)},
                     timeout=upload_timeout,
                 )
 
@@ -609,7 +628,13 @@ class NotionClient:
             self._raise_upload_http_error(resp)
 
     def _send_multi_part_bytes(
-        self, upload_url: str, upload_id: str, pdf_path: Path, upload_timeout: int
+        self,
+        upload_url: str,
+        upload_id: str,
+        pdf_path: Path,
+        upload_timeout: int,
+        *,
+        content_type: str = "application/pdf",
     ) -> None:
         part_number = 1
         filename = self.normalize_attachment_filename(pdf_path.name)
@@ -629,7 +654,7 @@ class NotionClient:
                                 "file": (
                                     filename,
                                     chunk,
-                                    "application/pdf",
+                                    content_type,
                                 )
                             },
                             timeout=upload_timeout,
@@ -757,3 +782,13 @@ class NotionClient:
             }
         }
         return self._request("PATCH", f"/pages/{page_id}", json_body=body)
+
+    def attach_source_uploads_to_page(
+        self, page_id: str, property_id: str, files: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Replace a bundle only after the caller verifies full ownership."""
+        return self._request(
+            "PATCH",
+            f"/pages/{page_id}",
+            json_body={"properties": {property_id: {"files": files}}},
+        )

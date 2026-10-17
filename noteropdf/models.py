@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+
+def validate_zotero_key(value: str) -> str:
+    if not re.fullmatch(r"[A-Z0-9]{8}", value):
+        raise ValueError("Zotero keys must be exactly 8 uppercase letters or digits.")
+    return value
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,15 @@ class ZoteroItem:
 @dataclass(frozen=True)
 class CandidatePdf:
     absolute_path: str
+    size: int
+    mtime_ns: int
+
+
+@dataclass(frozen=True)
+class SourceFile:
+    attachment_key: str
+    absolute_path: str
+    content_type: str
     size: int
     mtime_ns: int
 

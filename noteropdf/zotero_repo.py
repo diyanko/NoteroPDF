@@ -9,7 +9,14 @@ from typing import Any
 
 import requests
 
-from .models import CandidatePdf, ZoteroAttachment, ZoteroItem, ZoteroLibrary
+from .file_types import source_content_type
+from .models import (
+    CandidatePdf,
+    SourceFile,
+    ZoteroAttachment,
+    ZoteroItem,
+    ZoteroLibrary,
+)
 
 LOCAL_API_BASE_URL = "http://127.0.0.1:23119/api"
 _LOCAL_API_TIMEOUT = (0.5, 10.0)
@@ -509,3 +516,56 @@ class ZoteroRepository:
 
     def all_items(self) -> list[ZoteroItem]:
         return self.list_parent_items()
+
+    def select_source_files(
+        self, parent: ZoteroItem
+    ) -> tuple[str, list[SourceFile], str | None]:
+        files: list[SourceFile] = []
+        names: set[str] = set()
+        for attachment in sorted(
+            self.list_child_attachments(parent.item_id, parent.key),
+            key=lambda value: value.attachment_key,
+        ):
+            raw = attachment.path_raw or ""
+            if urllib.parse.urlparse(raw).scheme in {"http", "https", "notion"}:
+                continue
+            path = self.resolve_attachment_path(attachment)
+            content_type = source_content_type(path.name if path is not None else raw)
+            if content_type is None:
+                continue
+            if path is None or not path.is_file():
+                return (
+                    "BROKEN_ATTACHMENT_PATH",
+                    [],
+                    "A supporting file is not available locally.",
+                )
+            try:
+                stat = path.stat()
+            except OSError:
+                return (
+                    "BROKEN_ATTACHMENT_PATH",
+                    [],
+                    "A supporting file could not be read.",
+                )
+            name = path.name.casefold()
+            if name in names:
+                return (
+                    "MULTIPLE_PDFS",
+                    [],
+                    "Supporting attachments have duplicate filenames.",
+                )
+            names.add(name)
+            files.append(
+                SourceFile(
+                    attachment.attachment_key,
+                    str(path),
+                    content_type,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                )
+            )
+        return (
+            ("OK", files, None)
+            if files
+            else ("NO_SOURCE_FILES", [], "No supported local supporting files.")
+        )

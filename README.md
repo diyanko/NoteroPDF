@@ -109,6 +109,29 @@ selected database. NoteroPDF does not fall back to Zotero URI, DOI, title, or
 fuzzy matching. Unrelated Notion bookmarks are ignored. Notion property IDs are
 stored locally, so renaming a connected column does not break sync.
 
+## Supporting files
+
+Use `sources` when a paper also has spreadsheets, Word documents, or other local
+supporting files. Create a separate **Files & media** property named **Source
+files** in the connected Notero database, then choose the papers explicitly:
+
+```bash
+noteropdf sources --item-key ABCD1234
+noteropdf sources --item-key ABCD1234 --item-key EFGH5678 --files-property "Supporting files"
+```
+
+Use each parent item's eight-character Zotero key. The command previews first;
+confirm interactively or repeat the same selection with `--apply`. It reads only
+local attachments and uses the same exact Notero links as PDF sync.
+
+Supported formats: PDF, XLSX, XLS, CSV, TSV, DOCX, DOC, PPTX, TXT, JSON, Markdown,
+HTML, and ZIP. Unsupported formats and web bookmarks are ignored. Multiple files
+are handled as one reviewed bundle per paper. Removed local files are retained
+in Notion; unknown or changed remote bundles are protected. Ownership history is
+separate for each library, database, property, and parent item. The supporting
+files field must be different from the managed PDF field. Keep the local history
+database: without it, existing files cannot be replaced automatically.
+
 ## Troubleshooting
 
 Start with:
