@@ -4,30 +4,19 @@ import hashlib
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager
-from urllib.parse import unquote
-from uuid import UUID
 
 from .config import get_default_state_db_path
 from .state_store import FileLock
-
-
-def _canonical_id(value: str, *, encoded: bool = False) -> str:
-    value = value.strip()
-    if encoded:
-        value = unquote(value, errors="strict")
-    if not value:
-        raise ValueError("A Notion destination ID is required for safe sync.")
-    try:
-        return UUID(value).hex
-    except ValueError:
-        # Short property IDs are case-sensitive opaque strings.
-        return value
+from .util import canonical_notion_id
 
 
 def destination_key(data_source_id: str, property_id: str) -> str:
     """Return a canonical, non-secret identity for one files destination."""
     identity = json.dumps(
-        [_canonical_id(data_source_id), _canonical_id(property_id, encoded=True)],
+        [
+            canonical_notion_id(data_source_id),
+            canonical_notion_id(property_id, encoded=True),
+        ],
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(identity).hexdigest()

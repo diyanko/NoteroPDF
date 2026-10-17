@@ -11,6 +11,8 @@ from typing import Any
 
 import requests
 
+from .util import canonical_notion_id
+
 
 class NotionApiError(RuntimeError):
     def __init__(
@@ -465,17 +467,32 @@ class NotionClient:
                 return pages
 
     @staticmethod
-    def get_page_property(
+    def _page_properties_by_id(
         page: dict[str, Any], property_ref: str
+    ) -> list[dict[str, Any]]:
+        props = page.get("properties")
+        if not isinstance(props, dict):
+            return []
+        expected = canonical_notion_id(property_ref, encoded=True)
+        return [
+            prop
+            for prop in props.values()
+            if isinstance(prop, dict)
+            and isinstance(prop.get("id"), str)
+            and prop["id"].strip()
+            and canonical_notion_id(prop["id"], encoded=True) == expected
+        ]
+
+    @classmethod
+    def get_page_property(
+        cls, page: dict[str, Any], property_ref: str
     ) -> dict[str, Any] | None:
-        props = page.get("properties") or {}
-        direct = props.get(property_ref)
-        if isinstance(direct, dict):
-            return direct
-        for prop in props.values():
-            if isinstance(prop, dict) and str(prop.get("id") or "") == property_ref:
-                return prop
-        return None
+        matches = cls._page_properties_by_id(page, property_ref)
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+        props = page.get("properties")
+        direct = props.get(property_ref) if isinstance(props, dict) else None
+        return direct if isinstance(direct, dict) else None
 
     @classmethod
     def files_property_signature(
@@ -531,9 +548,8 @@ class NotionClient:
             != NotionDataSourceSnapshot.page_id_key(data_source_id)
         ):
             raise ValueError("The selected Notion page moved to another database.")
-        if not isinstance(page.get("properties"), dict):
-            raise ValueError("The selected Notion field could not be verified.")
-        prop = cls.get_page_property(page, property_ref)
+        matches = cls._page_properties_by_id(page, property_ref)
+        prop = matches[0] if len(matches) == 1 else None
         if (
             not prop
             or prop.get("type") != "files"
@@ -545,7 +561,8 @@ class NotionClient:
             not isinstance(row, dict)
             or not isinstance(row.get("name"), str)
             or not row["name"].strip()
-            or row.get("type") not in {"file", "file_upload", "external"}
+            or not isinstance(row.get("type"), str)
+            or row["type"] not in {"file", "file_upload", "external"}
             for row in raw_files
         ):
             raise ValueError(

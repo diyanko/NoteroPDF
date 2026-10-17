@@ -4,6 +4,8 @@ import hashlib
 import re
 from ast import literal_eval
 from pathlib import Path
+from urllib.parse import unquote
+from uuid import UUID
 
 
 def sha256_file(path: Path) -> str:
@@ -38,4 +40,17 @@ def unescape_js_string_literal(value: str) -> str:
     try:
         return literal_eval(f'"{value}"')
     except (SyntaxError, ValueError):
+        return value
+
+
+def canonical_notion_id(value: str, *, encoded: bool = False) -> str:
+    """Normalize UUID aliases while preserving opaque property-ID case."""
+    value = value.strip()
+    if encoded:
+        value = unquote(value, errors="strict")
+    if not value:
+        raise ValueError("A Notion destination ID is required for safe sync.")
+    try:
+        return UUID(value).hex
+    except ValueError:
         return value

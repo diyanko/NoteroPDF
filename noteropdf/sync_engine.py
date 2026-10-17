@@ -609,7 +609,10 @@ class SyncEngine:
             if approved is not None:
                 try:
                     current_hash = self._get_cached_hash(pdf.absolute_path)
-                except OSError:
+                    current_remote_signature = self._snapshot_files_signature(
+                        match.page_id
+                    )
+                except (OSError, NotionApiError):
                     return self._stale_preview_row(item, pdf, match)
                 matches_preview = (
                     NotionDataSourceSnapshot.page_id_key(approved.notion_page_id)
@@ -619,8 +622,7 @@ class SyncEngine:
                     and approved.pdf_mtime_ns == pdf.mtime_ns
                     and approved.pdf_sha256 == current_hash
                     and approved.attachment_key == pdf.attachment_key
-                    and approved.remote_files_signature
-                    == self._snapshot_files_signature(match.page_id)
+                    and approved.remote_files_signature == current_remote_signature
                 )
                 if not matches_preview:
                     return self._stale_preview_row(item, pdf, match)

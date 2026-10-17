@@ -12,7 +12,7 @@ from typing import Any
 from .config import AppConfig, SetupRequired
 from .destination_lock import destination_key
 from .models import SourceFile, SyncRow, SyncScope, ZoteroItem, validate_zotero_key
-from .notion_client import NotionApiError, NotionClient, NotionDataSourceSnapshot
+from .notion_client import NotionApiError, NotionClient
 from .status import Status
 from .sync_engine import MatchResult, PreviewAction, SyncEngine
 from .util import sha256_file
