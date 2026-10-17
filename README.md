@@ -68,6 +68,13 @@ On the first run, NoteroPDF:
 7. Matches items through their exact Notero-created links and shows what will be uploaded.
 8. Uploads PDFs only after one confirmation.
 
+The preview identifies the source library type and the connected Notion PDF
+field, counts uploads and unchanged items, and explains why items need attention.
+It shows up to five upload and skipped item keys by default. Run
+`noteropdf sync --details` to see every item key and outcome. Item titles, local
+file paths, and Notion page addresses stay out of this summary. Technical
+diagnostics remain available with `--verbose` and in the private local log.
+
 Later runs go directly to the preview. If no interactive terminal is available, sync remains preview-only unless `--apply` is supplied and exits nonzero when uploads are pending.
 
 The selected library is saved with your Notion connection. Each run reads only
@@ -82,6 +89,7 @@ an unavailable group stops the run instead of falling back to another library.
 | --- | --- |
 | `noteropdf` | Preview, confirm, and sync. |
 | `noteropdf sync` | The same complete sync workflow. |
+| `noteropdf sync --details` | Show every item key and its outcome, including unchanged items. |
 | `noteropdf sync --apply` | Preview and apply without a prompt; useful for automation. |
 | `noteropdf connect` | Choose a Zotero library, reconnect Notion, or choose a different database. |
 | `noteropdf doctor` | Check Zotero, Notion, credentials, schema, and local storage. |

@@ -1041,3 +1041,35 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     assert engine.zotero is None
     assert rows[0].action_taken == "preview_upload:missing_remote_pdf"
     assert engine.preview_actions()[0].notion_page_id == page_id
+
+
+def test_item_failure_diagnostics_stay_below_normal_console_level(tmp_path, caplog):
+    import logging
+
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, preview=True)
+    item = _make_item()
+    engine.cfg.notion.data_source_id = "source"
+    engine.zotero = SimpleNamespace(
+        all_items=lambda: [item],
+        select_candidate_pdf=lambda _item: (
+            "BROKEN_ATTACHMENT_PATH",
+            None,
+            "private diagnostic detail",
+        ),
+        close=lambda: None,
+    )
+    notion.validate_pdf_property = lambda *args: None
+    notion.build_data_source_snapshot = lambda *args, **kwargs: engine._snapshot
+    engine._resolved_pdf_property_ref = lambda: "pdf-id"
+    engine._logger = logging.getLogger("noteropdf.sync")
+    with caplog.at_level(logging.DEBUG, logger="noteropdf.sync"):
+        rows = engine.sync(apply=False)
+    assert rows[0].final_status == "BROKEN_ATTACHMENT_PATH"
+    private_records = [
+        record
+        for record in caplog.records
+        if "private diagnostic detail" in record.getMessage()
+    ]
+    assert private_records
+    assert all(record.levelno == logging.DEBUG for record in private_records)

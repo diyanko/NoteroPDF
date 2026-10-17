@@ -494,7 +494,7 @@ class SyncEngine:
                 item.title or "",
             )
             if row.error_message:
-                self._logger.warning(
+                self._logger.debug(
                     "item=%s key=%s status=%s reason=%s",
                     idx,
                     item.sync_key,
@@ -853,7 +853,7 @@ class SyncEngine:
             or not attached_signature[0][1]
             or not attached_signature[0][2]
         ):
-            self._logger.error(
+            self._logger.debug(
                 "Upload attached but Notion did not return a stable remote identity "
                 "for item=%s page=%s",
                 item.sync_key,
@@ -881,7 +881,7 @@ class SyncEngine:
                 )
             )
         except (OSError, sqlite3.Error, RuntimeError) as exc:
-            self._logger.error(
+            self._logger.debug(
                 "Upload attached but local state update failed for item=%s page=%s: %s",
                 item.sync_key,
                 match.page_id,

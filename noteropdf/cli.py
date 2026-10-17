@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import logging
+import re
 import sqlite3
 import sys
 import webbrowser
@@ -30,7 +31,7 @@ from .config import (
     validate_zotero_data_dir,
 )
 from .logging_setup import setup_run_logging
-from .models import ZoteroLibrary
+from .models import SyncRow, ZoteroLibrary
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
 from .settings import LocalSettings, save_settings
 from .state_store import StateStore
@@ -102,6 +103,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Apply the preview without an interactive confirmation",
+    )
+    sync.add_argument(
+        "--details",
+        action="store_true",
+        help="Show every item key and its outcome, including unchanged items",
     )
     connect = sub.add_parser(
         "connect",
@@ -388,21 +394,54 @@ def _load_ready_config() -> AppConfig:
     return load_app_config(credential_store=_credential_store())
 
 
-def _print_summary(rows, *, preview: bool) -> None:
+_UPLOAD_REASONS = {
+    "first_sync": "Add a PDF to an empty Notion field",
+    "missing_remote_pdf": "Add a PDF to an empty Notion field",
+    "changed": "Update the PDF previously uploaded by NoteroPDF",
+    "remote_drift_name_mismatch": "Restore the name of the PDF previously uploaded by NoteroPDF",
+}
+
+_ATTENTION_REASONS = {
+    "NO_PDF": "No local PDF is available. Download or attach a PDF in Zotero.",
+    "MULTIPLE_PDFS": "Several PDFs are available. Choose the intended PDF explicitly before syncing.",
+    "INVALID_PDF_SELECTION": "The saved PDF choice is unavailable or moved. Choose it again.",
+    "BROKEN_ATTACHMENT_PATH": "The PDF cannot be read. Check that it is downloaded in Zotero.",
+    "NO_NOTION_MATCH": "No accessible exact Notero page link was found. Sync this item with Notero first.",
+    "MULTIPLE_NOTION_MATCHES": "Several items point to one Notion page. Correct their Notero links.",
+    "NOTION_SCHEMA_ERROR": "The connected database or PDF field is unavailable. Run `noteropdf connect`.",
+    "NOTION_AUTH_ERROR": "Notion access failed. Check permissions or run `noteropdf connect`.",
+    "NOTION_RATE_LIMIT": "Notion is busy. Wait, then run sync again.",
+    "NOTION_NETWORK_ERROR": "Notion could not be reached. Check the connection and retry.",
+    "FILE_TOO_LARGE": "The PDF exceeds Notion's upload limit. Use a smaller PDF.",
+    "UPLOAD_FAILED": "The PDF could not be uploaded. Run sync again after checking the connection.",
+    "ATTACH_FAILED": "The uploaded PDF could not be attached. Run sync again.",
+    "STATE_SAVE_FAILED": "The PDF may be attached, but its history could not be saved. Run doctor before retrying.",
+    "STALE_PREVIEW": "The file or destination changed after preview. Run sync again to review it.",
+    "REMOTE_PDF_CONFLICT": "Notion contains unknown or multiple files. Review the field; nothing was replaced.",
+}
+
+
+def _item_label(row: SyncRow) -> str:
+    # Never echo arbitrary API strings or terminal controls as item identifiers.
+    key = row.zotero_item_key.rsplit("/", 1)[-1]
+    return f"Item {key}" if re.fullmatch(r"[A-Za-z0-9]{1,32}", key) else "Item"
+
+
+def _upload_reason(row: SyncRow) -> str:
+    reason = row.action_taken.partition(":")[2]
+    return _UPLOAD_REASONS.get(
+        reason, "Upload the selected PDF to its exact Notero page"
+    )
+
+
+def _print_summary(
+    rows: list[SyncRow],
+    *,
+    preview: bool,
+    cfg: AppConfig | None = None,
+    details: bool = False,
+) -> None:
     counts = Counter(row.final_status for row in rows)
-    uploads = sum(
-        1
-        for row in rows
-        if row.action_taken.startswith(("preview_upload:", "upload_attach:"))
-    )
-    skipped = sum(
-        count for status, count in counts.items() if status not in {"OK", "UNCHANGED"}
-    )
-    print("\nSync preview" if preview else "\nSync result")
-    print(f"- Items checked: {len(rows)}")
-    print(f"- PDFs {'to upload' if preview else 'uploaded'}: {uploads}")
-    print(f"- Already current: {counts.get('UNCHANGED', 0)}")
-    print(f"- Skipped or needing attention: {skipped}")
     upload_rows = [
         row
         for row in rows
@@ -410,32 +449,61 @@ def _print_summary(rows, *, preview: bool) -> None:
             "preview_upload:" if preview else "upload_attach:"
         )
     ]
-    if upload_rows:
-        label = "Planned uploads" if preview else "Uploaded"
-        print(f"- {label}:")
-        for row in upload_rows[:20]:
-            title = row.title or row.zotero_item_key
-            filename = Path(row.local_pdf_path).name if row.local_pdf_path else "PDF"
-            target = row.notion_page_url or row.notion_page_id or "Notion page"
-            print(f"  - {title} ({filename}) -> {target}")
-        if len(upload_rows) > 20:
-            print(f"  - ...and {len(upload_rows) - 20} more")
     attention_rows = [
         row for row in rows if row.final_status not in {"OK", "UNCHANGED"}
     ]
+    print("\nSync preview" if preview else "\nSync result")
+    if cfg is not None:
+        source = (
+            "selected Zotero group library"
+            if cfg.zotero.group_id is not None
+            else "personal Zotero library"
+        )
+        print(f"- Source: {source}")
+        print("- Destination: connected Notion database, dedicated PDF files field")
+    print(f"- Items checked: {len(rows)}")
+    print(f"- PDFs {'to upload' if preview else 'uploaded'}: {len(upload_rows)}")
+    print(f"- Already current: {counts.get('UNCHANGED', 0)}")
+    print(f"- Skipped or needing attention: {len(attention_rows)}")
+    if preview:
+        print("- Preview only. Notion has not changed.")
+    limit = len(rows) if details else 5
+    if upload_rows:
+        print("- Planned uploads:" if preview else "- Uploaded:")
+        for row in upload_rows[:limit]:
+            print(f"  - {_item_label(row)}: {_upload_reason(row)}")
+        if len(upload_rows) > limit:
+            print(
+                f"  - ...and {len(upload_rows) - limit} more; use `sync --details` to see every item"
+            )
     if attention_rows:
         print("- Needs attention by reason:")
         for status, count in sorted(
             Counter(row.final_status for row in attention_rows).items()
         ):
-            print(f"  - {status.replace('_', ' ').title()}: {count}")
-        print("- Examples:")
-        for row in attention_rows[:10]:
-            title = row.title or row.zotero_item_key
-            reason = row.error_message or row.final_status.replace("_", " ").lower()
-            print(f"  - {title}: {reason}")
-        if len(attention_rows) > 10:
-            print(f"  - ...and {len(attention_rows) - 10} more; see the diagnostic log")
+            reason = _ATTENTION_REASONS.get(
+                status,
+                "The item could not be processed safely. Run `noteropdf doctor`.",
+            )
+            print(f"  - {count}: {reason}")
+        print("- Skipped items:")
+        for row in attention_rows[:limit]:
+            reason = _ATTENTION_REASONS.get(
+                row.final_status, "Could not process this item safely. Run doctor."
+            )
+            print(f"  - {_item_label(row)}: {reason}")
+        if len(attention_rows) > limit:
+            print(
+                f"  - ...and {len(attention_rows) - limit} more; use `sync --details` to see every item"
+            )
+    if details:
+        unchanged = [row for row in rows if row.final_status == "UNCHANGED"]
+        if unchanged:
+            print("- Already current items:")
+            for row in unchanged:
+                print(
+                    f"  - {_item_label(row)}: The existing PDF is current; no upload needed"
+                )
 
 
 def _preview_upload_count(rows) -> int:
@@ -446,7 +514,7 @@ def _blocking_issue_count(rows) -> int:
     return sum(1 for row in rows if row.final_status in _BLOCKING_SYNC_STATUSES)
 
 
-def _run_sync(*, apply_without_prompt: bool) -> int:
+def _run_sync(*, apply_without_prompt: bool, details: bool = False) -> int:
     try:
         preview_cfg = _load_ready_config()
     except SetupRequired:
@@ -463,7 +531,7 @@ def _run_sync(*, apply_without_prompt: bool) -> int:
         approved_actions = engine.preview_actions()
     finally:
         engine.close()
-    _print_summary(preview, preview=True)
+    _print_summary(preview, preview=True, cfg=preview_cfg, details=details)
     pending = _preview_upload_count(preview)
     preview_blockers = _blocking_issue_count(preview)
     if pending == 0:
@@ -509,7 +577,7 @@ def _run_sync(*, apply_without_prompt: bool) -> int:
         )
     finally:
         engine.close()
-    _print_summary(result, preview=False)
+    _print_summary(result, preview=False, cfg=apply_cfg, details=details)
     approved_keys = {action.zotero_item_key for action in approved_actions}
     completed_keys = {
         row.zotero_item_key for row in result if row.final_status in {"OK", "UNCHANGED"}
@@ -621,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
         if command == "sync":
             return _run_sync(
                 apply_without_prompt=bool(getattr(args, "apply", False)),
+                details=bool(getattr(args, "details", False)),
             )
         parser.error(f"unknown command: {command}")
         return 2
