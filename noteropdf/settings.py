@@ -3,18 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .models import ZoteroLibrary
 from .state_store import StateStore
 
 SETTINGS_SCHEMA_VERSION = 1
 
 _SCHEMA_VERSION = "settings_schema_version"
 _ZOTERO_DATA_DIR = "zotero_data_dir"
+_ZOTERO_GROUP_ID = "zotero_group_id"
 _NOTION_DATA_SOURCE_ID = "notion_data_source_id"
 _PDF_PROPERTY_ID = "pdf_property_id"
 
 _MANAGED_KEYS = (
     _SCHEMA_VERSION,
     _ZOTERO_DATA_DIR,
+    _ZOTERO_GROUP_ID,
     _NOTION_DATA_SOURCE_ID,
     _PDF_PROPERTY_ID,
 )
@@ -28,6 +31,10 @@ class LocalSettings:
     zotero_data_dir: Path | None = None
     notion_data_source_id: str | None = None
     pdf_property_id: str | None = None
+    zotero_group_id: int | None = None
+
+    def __post_init__(self) -> None:
+        ZoteroLibrary(self.zotero_group_id)
 
 
 def load_settings(store: StateStore) -> LocalSettings:
@@ -46,11 +53,17 @@ def load_settings(store: StateStore) -> LocalSettings:
         )
 
     raw_zotero_dir = values.get(_ZOTERO_DATA_DIR)
+    raw_group_id = values.get(_ZOTERO_GROUP_ID)
+    try:
+        group_id = int(raw_group_id) if raw_group_id is not None else None
+    except ValueError as exc:
+        raise ValueError("Stored Zotero group ID is invalid.") from exc
     return LocalSettings(
         schema_version=schema_version,
         zotero_data_dir=Path(raw_zotero_dir) if raw_zotero_dir else None,
         notion_data_source_id=values.get(_NOTION_DATA_SOURCE_ID),
         pdf_property_id=values.get(_PDF_PROPERTY_ID),
+        zotero_group_id=group_id,
     )
 
 
@@ -70,5 +83,10 @@ def save_settings(store: StateStore, settings: LocalSettings) -> None:
         ),
         _NOTION_DATA_SOURCE_ID: settings.notion_data_source_id,
         _PDF_PROPERTY_ID: settings.pdf_property_id,
+        _ZOTERO_GROUP_ID: (
+            str(settings.zotero_group_id)
+            if settings.zotero_group_id is not None
+            else None
+        ),
     }
     store.update_settings({key: values[key] for key in _MANAGED_KEYS})

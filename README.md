@@ -2,7 +2,7 @@
 
 [PyPI](https://pypi.org/project/noteropdf/) | [Releases](https://github.com/diyanko/NoteroPDF/releases) | [Issues](https://github.com/diyanko/NoteroPDF/issues)
 
-NoteroPDF puts the PDFs in your personal Zotero library onto the matching Notion pages created by [Notero](https://github.com/dvanoni/notero).
+NoteroPDF puts the PDFs in your personal or selected group Zotero library onto the matching Notion pages created by [Notero](https://github.com/dvanoni/notero).
 
 NoteroPDF is a terminal application. You install it once, then run one command whenever you want to sync.
 
@@ -18,7 +18,7 @@ No configuration file or hosted service is required.
 
 You need:
 
-- Zotero with a personal library and local PDF attachments
+- Zotero with a personal or group library and local PDF attachments
 - Notero already syncing that library to a Notion database
 - full membership in the Notion workspace, with permission to create a personal access token
 
@@ -26,7 +26,8 @@ Leave Zotero open and enable **Settings → Advanced → Allow other application
 this computer to communicate with Zotero**. NoteroPDF makes only read requests
 to Zotero's local API and never changes the Zotero library.
 
-Group libraries are not supported in this release.
+Group libraries must be synchronized in Zotero Desktop, and their PDFs must
+already be downloaded to your computer.
 
 ## Install
 
@@ -58,7 +59,7 @@ noteropdf
 
 On the first run, NoteroPDF:
 
-1. Connects to your personal Zotero library.
+1. Connects to Zotero and lets you choose your personal library or a locally available group library.
 2. Opens Notion's personal access token page in the browser.
 3. Asks you to create a token with the Notion API capability and paste it once. The token input is hidden.
 4. Saves the token in your operating system's credential store.
@@ -69,6 +70,30 @@ On the first run, NoteroPDF:
 
 Later runs go directly to the preview. If no interactive terminal is available, sync remains preview-only unless `--apply` is supplied and exits nonzero when uploads are pending.
 
+The selected library is saved with your Notion connection. Each run reads only
+that library. To switch libraries, run `noteropdf connect`, choose the library,
+and select its Notero database. Existing connections continue using the personal
+library until you change them. Sync history stays separate for each group, and
+an unavailable group stops the run instead of falling back to another library.
+
+To keep several connections, give each one a name:
+
+```bash
+noteropdf connect --profile lab
+noteropdf sync --profile lab
+noteropdf doctor --profile lab
+```
+
+Each named connection remembers its own Zotero library, Notion database, PDF
+property, token, and sync history. Tokens stay in separate accounts in your
+operating system's credential store. You can use a different Notion workspace
+for each connection. Every command runs only the connection you selected.
+
+Leaving out `--profile` (or using `--profile default`) keeps your existing
+connection, token, and history. New names require `connect` first; a misspelled
+name stops sync instead of using another connection. Names use 1–32 lowercase
+letters, digits, or hyphens, start with a letter, and end with a letter or digit.
+
 ## Commands
 
 | Command | Purpose |
@@ -76,11 +101,48 @@ Later runs go directly to the preview. If no interactive terminal is available, 
 | `noteropdf` | Preview, confirm, and sync. |
 | `noteropdf sync` | The same complete sync workflow. |
 | `noteropdf sync --apply` | Preview and apply without a prompt; useful for automation. |
-| `noteropdf connect` | Reconnect Notion or choose a different database. |
+| `noteropdf connect` | Choose a Zotero library, reconnect Notion, or choose a different database. |
+| `noteropdf pdf ITEM` | List available PDF attachment keys for an exact item key. |
+| `noteropdf pdf ITEM ATTACHMENT` | Remember the exact PDF to use for this item in the selected library. |
+| `noteropdf pdf ITEM --clear` | Forget a saved PDF choice. |
 | `noteropdf doctor` | Check Zotero, Notion, credentials, schema, and local storage. |
 | `noteropdf --version` | Show the installed version. |
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
+Add `--profile NAME` to any command to use a named connection.
+
+To try a smaller batch, select collections or individual parent items from the
+connected Zotero library:
+
+```bash
+noteropdf sync --collection-key ABCD1234
+noteropdf sync --item-key EFGH5678 --item-key IJKL9012
+noteropdf sync --collection-key ABCD1234 --item-key EFGH5678 --apply
+```
+
+Keys are the eight uppercase letters or digits in Zotero item and collection
+links, such as `zotero://select/library/items/EFGH5678`. Use the parent paper's
+key, not a PDF attachment's key. Repeat a flag to include more collections or
+items. Combining both flags selects only the requested items directly inside
+the requested collections. Subcollections are not included automatically.
+Filters apply to this run only; omitting them syncs the whole connected library.
+
+A missing item or a collection with no readable parent items stops the run;
+check its key and the selected library. Empty collections also stop the run.
+The preview and confirmed upload use the same filters. Safety checks still
+cover the whole library: an item outside your selection sharing a Notion target
+blocks that target too.
+
+When an item has several PDFs, sync skips it until you explicitly choose one.
+Find the parent item and attachment keys in Zotero's item links, then run
+`noteropdf pdf ITEM` to see available local PDF attachment keys. Save your choice
+with `noteropdf pdf ITEM ATTACHMENT`, then run sync to review it. Choices stay
+separate for personal and group libraries, and the selection command only changes
+local preferences. Add `--profile lab` to inspect or save choices in a named
+connection. It never uploads or changes Zotero or Notion. If the chosen
+attachment disappears, moves, or stops being a local PDF, sync skips the item
+until you choose again or clear the choice. Editing the contents of the chosen
+PDF follows the normal preview and confirmation workflow.
 
 ## Safe by Design
 
@@ -90,6 +152,7 @@ Add `--verbose` for technical details or `--no-color` for plain terminal output.
 - A Notion PDF field changed after preview is skipped instead of overwritten.
 - Multiple or unknown files in the destination field are never removed.
 - Ambiguous PDF or Notion matches are skipped instead of guessed.
+- Library changes during scanning stop the run before uploads begin.
 - Uploads are serial, retry transient Notion errors, and respect `Retry-After` and workspace size limits.
 - Zotero data and PDFs go directly from your computer to Notion. NoteroPDF has no hosted service.
 - In normal setup, the Notion token is stored only in Keychain, Credential Manager, Secret Service, or KWallet. Setup stops with a clear error if the operating system's credential store is unavailable.
