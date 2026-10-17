@@ -888,7 +888,7 @@ def test_sources_reuses_exact_scope_and_approval(monkeypatch, apply_now):
         def close(self):
             pass
 
-    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda: cfg)
+    monkeypatch.setattr("noteropdf.cli._load_ready_config", lambda _profile: cfg)
     monkeypatch.setattr(
         "noteropdf.cli.source_files_config", lambda config, name: config
     )

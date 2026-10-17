@@ -4,6 +4,7 @@ import argparse
 import getpass
 import logging
 import re
+import shlex
 import sqlite3
 import sys
 import webbrowser
@@ -514,10 +515,12 @@ def _run_pdf(
             print("PDF choices in the selected library (attachment keys):")
             for att in attachments:
                 choice = PdfSelection(att.attachment_key, att.path_raw or "")
-                status, _, _ = repo.select_candidate_pdf(parent, selection=choice)
+                status, pdf, _ = repo.select_candidate_pdf(parent, selection=choice)
                 if status == Status.OK.value:
                     marker = " [saved]" if saved == choice else ""
-                    print(f"- {att.attachment_key}{marker}")
+                    print(
+                        f"- {att.attachment_key}: PDF, {_file_size(pdf.size) if pdf else 'size unavailable'}{marker}"
+                    )
             print(
                 f"[NEXT] Run `noteropdf pdf{profile_flag} ITEM ATTACHMENT` to save an exact choice."
             )
@@ -828,10 +831,82 @@ def _run_doctor(profile: str | None = None) -> int:
     return 0
 
 
+def _source_label(key: str) -> str:
+    parent, separator, attachment = key.partition(":")
+    parent = parent.rsplit("/", 1)[-1]
+    label = f"Item {parent}" if re.fullmatch(r"[A-Z0-9]{8}", parent) else "Item"
+    if separator and re.fullmatch(r"[A-Z0-9]{8}", attachment):
+        label += f", attachment {attachment}"
+    return label
+
+
+def _file_size(size: int) -> str:
+    value = float(size)
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.0f} {unit}" if unit == "bytes" else f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable file size")
+
+
+def _sources_command(
+    item_keys: tuple[str, ...],
+    property_name: str,
+    profile: str | None,
+    *,
+    details: bool,
+    apply: bool,
+) -> str:
+    args = ["noteropdf", "sources"]
+    if profile:
+        args.extend(("--profile", profile))
+    for key in item_keys:
+        args.extend(("--item-key", key))
+    args.extend(("--files-property", property_name))
+    if details:
+        args.append("--details")
+    if apply:
+        args.append("--apply")
+    return shlex.join(args)
+
+
+def _print_source_outcomes(
+    rows: list[SyncRow], *, preview: bool, details: bool, profile: str | None
+) -> None:
+    visible = rows if details else rows[:10]
+    for row in visible:
+        if row.error_message:
+            reason = recovery_guidance(row.error_message, profile)
+        elif row.final_status == Status.UNCHANGED.value:
+            reason = "Already current; no upload needed."
+        elif row.action_taken.startswith("upload_attach:"):
+            reason = "File update verified."
+        else:
+            continue
+        print(f"  - {_source_label(row.zotero_item_key)}: {reason}")
+    if len(rows) > len(visible):
+        print(
+            f"  - {len(rows) - len(visible)} more outcomes; repeat the same command with --details."
+        )
+    if not preview and any(
+        row.final_status == Status.STATE_SAVE_FAILED.value for row in rows
+    ):
+        print(
+            "[WARN] Some files may already be attached. Existing files stay protected until their history can be verified."
+        )
+
+
 def _run_sources(
-    *, item_keys: tuple[str, ...], property_name: str, apply_without_prompt: bool
+    *,
+    item_keys: tuple[str, ...],
+    property_name: str,
+    apply_without_prompt: bool,
+    profile: str | None = None,
+    details: bool = False,
 ) -> int:
-    cfg = source_files_config(_load_ready_config(), property_name)
+    profile = normalize_profile(profile)
+    print(f"[INFO] Connection: {profile or 'default'}")
+    cfg = source_files_config(_load_ready_config(profile), property_name)
     engine = SourceFilesEngine(cfg, item_keys=item_keys)
     try:
         preview = engine.sync(apply=False)
@@ -840,16 +915,22 @@ def _run_sources(
         engine.close()
     pending = len(approved)
     print("Supporting files preview")
+    print("- Destination: connected Notion database, separate supporting files field")
     print(f"- Files to upload: {pending}")
-    for action in approved[:20]:
-        print(f"  Add or update {action.zotero_item_key} ({action.pdf_size} bytes)")
-    if pending > 20:
-        print(f"  ... and {pending - 20} more files")
+    for action in approved[: len(approved) if details else 10]:
+        suffix = Path(action.pdf_absolute_path).suffix.lower()
+        kind = (
+            suffix[1:].upper()
+            if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix)
+            else "Supporting"
+        )
+        print(
+            f"  - {_source_label(action.zotero_item_key)}: {kind} file, {_file_size(action.pdf_size)}"
+        )
     blockers = _blocking_issue_count(preview)
     print(f"- Issues needing attention: {blockers}")
-    for row in preview:
-        if row.error_message:
-            print(f"- {row.zotero_item_key}: {row.error_message}")
+    print("- Preview only. Notion has not changed.")
+    _print_source_outcomes(preview, preview=True, details=details, profile=profile)
     if not pending:
         return 1 if blockers else 0
     should_apply = apply_without_prompt
@@ -858,9 +939,17 @@ def _run_sources(
             f"Upload {pending} supporting files to Notion now?", default_yes=False
         )
     if not should_apply:
-        print("[NEXT] Preview only. Repeat the same selection with --apply to upload.")
-        return (1 if blockers else 2) if not _stdin_interactive() else 0
-    apply_cfg = source_files_config(_load_ready_config(), property_name)
+        if _stdin_interactive():
+            print(
+                "[OK] Cancelled. Notion was not changed. Adjust your selection and preview again when ready."
+            )
+            return 0
+        command = _sources_command(
+            item_keys, property_name, profile, details=details, apply=True
+        )
+        print(f"[NEXT] Preview only. Run `{command}` to apply this selection.")
+        return 1 if blockers else 2
+    apply_cfg = source_files_config(_load_ready_config(profile), property_name)
     if apply_cfg != cfg:
         print("[WARN] The connection changed after preview. Run the preview again.")
         return 1
@@ -874,10 +963,19 @@ def _run_sources(
     }
     failed = len({action.zotero_item_key for action in approved} - completed)
     result_blockers = _blocking_issue_count(result)
+    print("Supporting files result")
     print(
-        f"- Files uploaded: {sum(row.action_taken.startswith('upload_attach:') for row in result)}"
+        f"- File updates verified: {sum(row.action_taken.startswith('upload_attach:') for row in result)}"
     )
     print(f"- Issues needing attention: {max(failed, result_blockers)}")
+    _print_source_outcomes(result, preview=False, details=details, profile=profile)
+    if failed or result_blockers:
+        command = _sources_command(
+            item_keys, property_name, profile, details=details, apply=False
+        )
+        print(
+            f"[NEXT] Run `{command}` to review the current state before trying again."
+        )
     return 1 if failed or result_blockers or blockers else 0
 
 
@@ -935,6 +1033,8 @@ def main(argv: list[str] | None = None) -> int:
                 item_keys=tuple(args.item_key),
                 property_name=args.files_property,
                 apply_without_prompt=args.apply,
+                profile=profile,
+                details=bool(getattr(args, "details", False)),
             )
         parser.error(f"unknown command: {command}")
         return 2
