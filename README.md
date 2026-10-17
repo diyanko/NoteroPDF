@@ -2,6 +2,9 @@
 
 [PyPI](https://pypi.org/project/noteropdf/) | [Releases](https://github.com/diyanko/NoteroPDF/releases) | [Issues](https://github.com/diyanko/NoteroPDF/issues)
 
+> This guide describes development on `main`, including unreleased features.
+> For the current PyPI release, use the [0.4.0 guide](https://github.com/diyanko/NoteroPDF/blob/v0.4.0/README.md).
+
 NoteroPDF puts the PDFs in your personal or selected group Zotero library onto the matching Notion pages created by [Notero](https://github.com/dvanoni/notero).
 
 NoteroPDF is a terminal application. You install it once, then run one command whenever you want to sync.

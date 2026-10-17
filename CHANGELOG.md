@@ -4,11 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- selection of personal or locally synchronized Zotero group libraries, with separate sync histories
+- named connections for different libraries, Notion destinations, and credentials
+- collection and item filters for focused sync batches, plus remembered choices for items with multiple PDFs
+- previewed supporting-file bundles in a separate Notion files property
+- back, edit, review, and cancel during connection setup
+- recognizable filenames in local interactive attachment choices, with control characters and full paths removed
+
 ### Changed
 
+- activate replacement credentials and connection settings together, preserving the previous connection if setup is cancelled or fails
+- explain per-item outcomes and partial failures without exposing private research metadata in logs, errors, or redirected output
+- protect shared Notion destinations across connections and recheck page and property identity around uploads
+- continue other approved items when one destination becomes unavailable or no longer matches its preview
 - unified local and CI validation with `python scripts/check.py` and optional package checks
 - required successful CI on the exact main-branch commit before release publication
 - documented solo maintenance, concurrent work, contributor reporting, and product direction
+
+### Compatibility
+
+- existing default connections continue to load; saving a connection upgrades its settings and credential reference, so older versions require reconnecting
+- Zotero remains read-only, unknown or concurrently changed Notion files stay protected, and local attachment removal does not delete uploaded supporting files
 
 ## 0.4.0 - 2026-08-09
 

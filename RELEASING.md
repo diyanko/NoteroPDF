@@ -204,7 +204,9 @@ do not silently break existing settings or commands in a patch. There is no fixe
 release schedule and no version bump for each development commit.
 
 Before publishing, review the changelog and generated release notes for clear
-user-facing language, setup instructions, and any migration steps. The application
+user-facing language, setup instructions, and any migration steps. Update or remove
+the README's development notice so its installation instructions describe the
+release being published. The application
 continues to support the Python versions declared in `pyproject.toml`.
 
 The permanent publishing identifiers are:
