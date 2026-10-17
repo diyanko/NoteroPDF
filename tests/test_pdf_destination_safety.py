@@ -25,6 +25,7 @@ def test_pdf_destination_change_during_upload_never_attaches(
     page = engine._snapshot.get_page("page-1")
     page["parent"] = {"type": "data_source_id", "data_source_id": "ds"}
     engine.cfg.notion.data_source_id = "ds"
+    engine.data_source_id = "ds"
     item = _make_item()
     row = engine._sync_one(item)
     assert row.action_taken.startswith("preview_upload:")
