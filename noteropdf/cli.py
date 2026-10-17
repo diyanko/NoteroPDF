@@ -867,7 +867,20 @@ def _sources_command(
         args.append("--details")
     if apply:
         args.append("--apply")
+    if sys.platform == "win32":
+        # This is explicitly PowerShell guidance; Command Prompt has different
+        # quoting rules for arbitrary user-chosen property names.
+        return " ".join(
+            argument
+            if re.fullmatch(r"[A-Za-z0-9_./:-]+", argument)
+            else "'" + argument.replace("'", "''") + "'"
+            for argument in args
+        )
     return shlex.join(args)
+
+
+def _source_shell() -> str:
+    return "PowerShell" if sys.platform == "win32" else "a POSIX shell"
 
 
 def _print_source_outcomes(
@@ -947,7 +960,9 @@ def _run_sources(
         command = _sources_command(
             item_keys, property_name, profile, details=details, apply=True
         )
-        print(f"[NEXT] Preview only. Run `{command}` to apply this selection.")
+        print(
+            f"[NEXT] Preview only. In {_source_shell()}, run `{command}` to apply this selection."
+        )
         return 1 if blockers else 2
     apply_cfg = source_files_config(_load_ready_config(profile), property_name)
     if apply_cfg != cfg:
@@ -974,7 +989,7 @@ def _run_sources(
             item_keys, property_name, profile, details=details, apply=False
         )
         print(
-            f"[NEXT] Run `{command}` to review the current state before trying again."
+            f"[NEXT] In {_source_shell()}, run `{command}` to review the current state before trying again."
         )
     return 1 if failed or result_blockers or blockers else 0
 
