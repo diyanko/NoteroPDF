@@ -243,3 +243,138 @@ def test_invalid_cli_profile_explains_the_name_format(capsys):
         cli._build_parser().parse_args(["sync", "--profile", "Lab"])
     assert error.value.code == 2
     assert "Profile names must be" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("profile", [None, "default", "lab-2026"])
+def test_recovery_commands_are_validated_shell_arguments(profile):
+    import shlex
+
+    from noteropdf.profiles import connect_command, recovery_guidance
+
+    expected = ["noteropdf", "connect"]
+    if profile == "lab-2026":
+        expected.extend(("--profile", profile))
+    command = connect_command(profile)
+    assert shlex.split(command) == expected
+    message = "Run `noteropdf connect` to replace the token."
+    rendered = recovery_guidance(message, profile)
+    assert rendered == f"Run `{command}` to replace the token."
+    assert recovery_guidance(rendered, profile) == rendered
+    assert (
+        recovery_guidance("Check access and try again.", profile)
+        == "Check access and try again."
+    )
+    with pytest.raises(ValueError, match="Profile names"):
+        connect_command("lab; echo unsafe")
+
+
+@pytest.fixture
+def rejected_token_error(monkeypatch):
+    from noteropdf.notion_client import NotionApiError, NotionClient
+
+    client = NotionClient(token="test-token", notion_version="2026-03-11")
+    response = SimpleNamespace(status_code=401, text="expired", headers={})
+    monkeypatch.setattr(client._session, "request", lambda *_args, **_kw: response)
+    try:
+        with pytest.raises(NotionApiError) as error:
+            client.ping()
+        return error.value
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("command", ["sync", "doctor"])
+@pytest.mark.parametrize("profile", [None, "default", "lab"])
+def test_main_keeps_selected_connection_in_client_error_hints(
+    monkeypatch, isolated_paths, caplog, rejected_token_error, command, profile
+):
+    seen = []
+
+    def fail(selected_profile):
+        seen.append(selected_profile)
+        raise rejected_token_error
+
+    monkeypatch.setattr(cli, "setup_run_logging", lambda *_args, **_kwargs: None)
+    if command == "sync":
+        monkeypatch.setattr(
+            cli, "_run_sync", lambda *, profile, **_kwargs: fail(profile)
+        )
+    else:
+        monkeypatch.setattr(cli, "_run_doctor", fail)
+    arguments = [command] + (["--profile", profile] if profile else [])
+    with caplog.at_level("INFO", logger="noteropdf.cli"):
+        assert cli.main(arguments) == 2
+    assert seen == (["lab"] if profile == "lab" else [None])
+    expected = (
+        "noteropdf connect --profile lab" if profile == "lab" else "noteropdf connect"
+    )
+    assert f"Run `{expected}` and paste a valid personal access token" in caplog.text
+    if profile == "lab":
+        assert "`noteropdf connect`" not in caplog.text
+
+
+@pytest.mark.parametrize("profile", [None, "lab"])
+def test_sync_row_recovery_keeps_selected_connection(
+    monkeypatch, isolated_paths, capsys, rejected_token_error, profile
+):
+    from noteropdf.models import SyncRow
+    from noteropdf.sync_engine import SyncEngine
+
+    selected = []
+    row = SyncRow(
+        "ITEM0001",
+        None,
+        None,
+        None,
+        None,
+        None,
+        "skip",
+        "NOTION_AUTH_ERROR",
+        SyncEngine._format_api_error(rejected_token_error),
+    )
+
+    class Engine:
+        def __init__(self, _cfg):
+            pass
+
+        def sync(self, **_kwargs):
+            return [row]
+
+        def preview_actions(self):
+            return ()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "setup_run_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_load_ready_config",
+        lambda selected_profile: selected.append(selected_profile) or object(),
+    )
+    monkeypatch.setattr(cli, "SyncEngine", Engine)
+    arguments = ["sync"] + (["--profile", profile] if profile else [])
+    assert cli.main(arguments) == 1
+    assert selected == [profile]
+    output = capsys.readouterr().out
+    expected = "noteropdf connect --profile lab" if profile else "noteropdf connect"
+    assert f"Run `{expected}` and paste a valid personal access token" in output
+    if profile:
+        assert "`noteropdf connect`" not in output
+
+
+def test_doctor_scopes_local_settings_recovery(monkeypatch, isolated_paths, capsys):
+    def invalid_settings(**_kwargs):
+        raise ValueError(
+            "Unsupported settings. Run `noteropdf connect` to create fresh settings."
+        )
+
+    monkeypatch.setattr(cli, "load_local_settings", invalid_settings)
+    monkeypatch.setattr(cli, "detect_zotero_data_dir", lambda: None)
+    monkeypatch.setattr(
+        cli, "_credential_store", lambda _profile: SimpleNamespace(load=lambda: None)
+    )
+    assert cli._run_doctor("lab") == 2
+    output = capsys.readouterr().out
+    assert "Run `noteropdf connect --profile lab` to create fresh settings." in output
+    assert "`noteropdf connect`" not in output
