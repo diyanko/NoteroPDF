@@ -742,7 +742,10 @@ def test_doctor_reports_workspace_limit_and_group_libraries(tmp_path: Path):
     assert any("Selected Zotero library: personal" in line for line in lines)
     assert any("local read-only API" in line for line in lines)
     assert any("Notion workspace upload limit: 123456 bytes." in line for line in lines)
-    assert any("Notion data source is accessible: ds-1" in line for line in lines)
+    assert any("Notion data source is accessible." in line for line in lines)
+    assert all(
+        private not in "\n".join(lines) for private in ("ds-1", "pdf-id", str(tmp_path))
+    )
 
     def fail_snapshot() -> list[object]:
         raise RuntimeError("source unavailable")
@@ -1065,7 +1068,7 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     assert engine.preview_actions()[0].notion_page_id == page_id
 
 
-def test_item_failure_diagnostics_stay_below_normal_console_level(tmp_path, caplog):
+def test_item_failure_diagnostics_omit_private_metadata(tmp_path, caplog):
     import logging
 
     pdf = _make_pdf(tmp_path)
@@ -1093,8 +1096,11 @@ def test_item_failure_diagnostics_stay_below_normal_console_level(tmp_path, capl
         for record in caplog.records
         if "private diagnostic detail" in record.getMessage()
     ]
-    assert private_records
-    assert all(record.levelno == logging.DEBUG for record in private_records)
+    assert not private_records
+    assert "BROKEN_ATTACHMENT_PATH" in caplog.text
+    assert item.title not in caplog.text
+    assert "page=" not in caplog.text
+    assert "key=" not in caplog.text
 
 
 def test_approval_binds_attachment_identity_even_when_two_keys_use_same_file(tmp_path):

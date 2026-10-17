@@ -34,6 +34,11 @@ def recovery_guidance(
 ) -> str:
     """Scope the standard reconnect instruction at the presentation boundary."""
     command = connect_command(profile)
+    selected_profile = normalize_profile(profile)
+    doctor = "noteropdf doctor" + (
+        f" --profile {selected_profile}" if selected_profile else ""
+    )
+    message = message.replace("`noteropdf doctor`", f"`{doctor}`")
     message = message.replace("`noteropdf connect`", f"`{command}`")
     if item_key is not None:
         match = re.fullmatch(r"(?:groups/[1-9][0-9]*/)?([A-Z0-9]{8})", item_key)

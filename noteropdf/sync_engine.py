@@ -143,11 +143,9 @@ class SyncEngine:
         """Validate Zotero paths and return status messages."""
         lines: list[str] = []
         if not self.cfg.zotero.data_dir.exists():
-            raise RuntimeError(f"Zotero data_dir not found: {self.cfg.zotero.data_dir}")
+            raise RuntimeError("The configured Zotero data folder is unavailable.")
         if not self.cfg.zotero.storage_dir.exists():
-            raise RuntimeError(
-                f"Zotero storage_dir not found: {self.cfg.zotero.storage_dir}"
-            )
+            raise RuntimeError("The configured Zotero storage folder is unavailable.")
         lines.append("- Zotero folders were found.")
         return lines
 
@@ -159,7 +157,7 @@ class SyncEngine:
 
         lines.extend(self._validate_zotero_paths())
 
-        lines.append(f"- Notion token source: {self.cfg.notion_token_source}.")
+        lines.append("- Notion token uses the operating-system credential store.")
 
         try:
             sample = zotero.list_parent_items()
@@ -174,7 +172,7 @@ class SyncEngine:
             )
         except Exception as exc:
             raise RuntimeError(
-                f"Zotero read-only snapshot check failed: {exc}"
+                "Zotero read-only snapshot check failed. Check Zotero and reconnect."
             ) from exc
         lines.append("- Zotero read safety: using the local read-only API.")
 
@@ -188,14 +186,12 @@ class SyncEngine:
 
         ds_id = self.cfg.notion.data_source_id
         self.data_source_id = ds_id
-        lines.append(f"- Notion data source is accessible: {ds_id}")
+        lines.append("- Notion data source is accessible.")
 
         pdf_property = self._resolved_pdf_property_ref()
         self._pdf_property_ref = pdf_property
         notion.validate_pdf_property(ds_id, pdf_property)
-        lines.append(
-            f"- Target Notion PDF property '{pdf_property}' exists and is a files field."
-        )
+        lines.append("- The target Notion PDF property exists and is a files field.")
 
         lines.append(
             f"- Deterministic matching: {notero_link_count} exact Notero page links."
@@ -213,8 +209,10 @@ class SyncEngine:
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except Exception as exc:
-                raise RuntimeError(f"{label} is not writable: {path} ({exc})") from exc
-            lines.append(f"- {label} is writable: {path}")
+                raise RuntimeError(
+                    f"{label} is not writable. Check local folder permissions."
+                ) from exc
+            lines.append(f"- {label} is writable.")
 
         lines.append(
             "- Safety scope: this app only updates the configured Notion files field."
@@ -506,24 +504,12 @@ class SyncEngine:
                     selected_pdf=selected_pdfs[item.sync_key],
                 )
                 rows.append(row)
-                self._logger.debug(
-                    "item=%s/%s status=%s action=%s key=%s page=%s title=%s",
-                    idx,
-                    total,
-                    row.final_status,
-                    row.action_taken,
-                    item.sync_key,
-                    row.notion_page_id or "-",
-                    item.title or "",
+                safe_status = (
+                    row.final_status
+                    if row.final_status in {status.value for status in Status}
+                    else "UNKNOWN"
                 )
-                if row.error_message:
-                    self._logger.debug(
-                        "item=%s key=%s status=%s reason=%s",
-                        idx,
-                        item.sync_key,
-                        row.final_status,
-                        row.error_message,
-                    )
+                self._logger.debug("item=%s/%s status=%s", idx, total, safe_status)
 
             self._logger.debug("Sync run completed: processed=%s", len(rows))
             return rows
@@ -897,9 +883,7 @@ class SyncEngine:
         ):
             self._logger.debug(
                 "Upload attached but Notion did not return a stable remote identity "
-                "for item=%s page=%s",
-                item.sync_key,
-                match.page_id,
+                "for the current item.",
             )
             return self._state_save_failed_row(item, pdf, match)
         remote_name, remote_type, remote_identity = attached_signature[0]
@@ -922,13 +906,8 @@ class SyncEngine:
                     remote_file_identity=remote_identity,
                 )
             )
-        except (OSError, sqlite3.Error, RuntimeError) as exc:
-            self._logger.debug(
-                "Upload attached but local state update failed for item=%s page=%s: %s",
-                item.sync_key,
-                match.page_id,
-                exc,
-            )
+        except (OSError, sqlite3.Error, RuntimeError):
+            self._logger.debug("Upload attached but local state update failed.")
             return self._state_save_failed_row(item, pdf, match)
 
         return SyncRow(

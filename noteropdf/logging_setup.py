@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from copy import copy
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import ClassVar
@@ -10,8 +11,33 @@ from typing import ClassVar
 from .profiles import normalize_profile, recovery_guidance
 
 
+class _ApplicationRecordsOnly(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # HTTP libraries can log request URLs containing private object IDs.
+        return record.name == "noteropdf" or record.name.startswith("noteropdf.")
+
+
+class _DiagnosticFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        # Tracebacks include local source paths and arbitrary exception text.
+        safe = copy(record)
+        safe.exc_info = None
+        safe.exc_text = None
+        safe.stack_info = None
+        return super().format(safe)
+
+
 class _PrivateRotatingFileHandler(RotatingFileHandler):
     """Create diagnostic logs with owner-only permissions where supported."""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # Logging failures must not invoke the standard traceback/argument dump.
+        try:
+            sys.stderr.write(
+                "[WARN] The diagnostic log could not be written. Check local folder permissions.\n"
+            )
+        except OSError:
+            pass
 
     def _open(self):
         stream = super()._open()
@@ -66,6 +92,28 @@ def _should_use_color(no_color: bool) -> bool:
     return bool(getattr(stream, "isatty", lambda: False)())
 
 
+def setup_console_logging(
+    no_color: bool = False,
+    verbose: bool = False,
+    *,
+    profile: str | None = None,
+) -> None:
+    """Configure the same private output policy even when no log file opens."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    root.setLevel(logging.DEBUG)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+    stream_handler.addFilter(_ApplicationRecordsOnly())
+    stream_handler.setFormatter(
+        _UserConsoleFormatter(
+            use_color=_should_use_color(no_color), verbose=verbose, profile=profile
+        )
+    )
+    root.addHandler(stream_handler)
+
+
 def setup_run_logging(
     log_dir: Path,
     no_color: bool = False,
@@ -75,23 +123,7 @@ def setup_run_logging(
 ) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "noteropdf.log"
-
-    root = logging.getLogger()
-    for handler in list(root.handlers):
-        root.removeHandler(handler)
-
-    root.setLevel(logging.DEBUG)
-    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
-    stream_handler.setFormatter(
-        _UserConsoleFormatter(
-            use_color=_should_use_color(no_color), verbose=verbose, profile=profile
-        )
-    )
-    root.addHandler(stream_handler)
-
+    setup_console_logging(no_color, verbose, profile=profile)
     file_handler = _PrivateRotatingFileHandler(
         log_path,
         maxBytes=1_000_000,
@@ -99,7 +131,9 @@ def setup_run_logging(
         encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(fmt)
-    root.addHandler(file_handler)
-
+    file_handler.addFilter(_ApplicationRecordsOnly())
+    file_handler.setFormatter(
+        _DiagnosticFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    logging.getLogger().addHandler(file_handler)
     return log_path

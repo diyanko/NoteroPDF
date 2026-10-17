@@ -62,6 +62,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_credential_store", credentials)
     monkeypatch.setattr(config, "CredentialStore", credentials)
     monkeypatch.setattr(cli, "_stdin_interactive", lambda: True)
+    monkeypatch.setattr(cli, "_stdout_interactive", lambda: True)
     monkeypatch.setattr(cli, "_select_zotero_directory", lambda existing: zotero)
     monkeypatch.setattr(
         cli, "_select_zotero_library", lambda existing: ZoteroLibrary(123, "Lab")
