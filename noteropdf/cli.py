@@ -571,8 +571,18 @@ def _run_connect(profile: str | None = None) -> int:
         print("[OK] Setup cancelled. The saved connection was not changed.")
         return 0
     finally:
+        failure_pending = sys.exc_info()[0] is not None
+        close_interrupt: BaseException | None = None
         if notion is not None:
-            notion.close()
+            try:
+                notion.close()
+            except (KeyboardInterrupt, SystemExit) as exc:
+                if not failure_pending:
+                    close_interrupt = exc
+            except Exception:  # noqa: BLE001 - cleanup must preserve the primary failure
+                logging.getLogger("noteropdf.cli").warning(
+                    "The temporary Notion connection could not be closed cleanly."
+                )
         if staged_id is not None and not committed:
             # An interruption can arrive just after SQLite commits. Never delete
             # a generation that the saved connection may already reference.
@@ -587,6 +597,8 @@ def _run_connect(profile: str | None = None) -> int:
                     "[WARN] An unused token may remain in the credential store. "
                     "No previously saved token was removed."
                 )
+        if close_interrupt is not None:
+            raise close_interrupt
     print(f"[OK] PDF destination: {target.label} -> {pdf.name}")
     command = f"noteropdf sync --profile {profile}" if profile else "noteropdf"
     print(f"[NEXT] Run `{command}` to preview your first sync.")
