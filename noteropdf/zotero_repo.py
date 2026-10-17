@@ -15,6 +15,7 @@ from .models import (
     ZoteroAttachment,
     ZoteroItem,
     ZoteroLibrary,
+    validate_zotero_key,
 )
 
 LOCAL_API_BASE_URL = "http://127.0.0.1:23119/api"
@@ -344,6 +345,21 @@ class ZoteroRepository:
         for _record, data in parent_records:
             key = str(data["key"])
             item_id = id_by_key[key]
+            collections = data.get("collections", [])
+            if not isinstance(collections, list) or any(
+                not isinstance(value, str) for value in collections
+            ):
+                raise _LocalApiProtocolError(
+                    "Zotero local API returned invalid collection membership."
+                )
+            try:
+                collection_keys = tuple(
+                    validate_zotero_key(value) for value in collections
+                )
+            except ValueError as exc:
+                raise _LocalApiProtocolError(
+                    "Zotero local API returned invalid collection membership."
+                ) from exc
             parents.append(
                 ZoteroItem(
                     item_id=item_id,
@@ -352,6 +368,7 @@ class ZoteroRepository:
                     zotero_uri=f"zotero://select/{self._library.select_path}/items/{key}",
                     notero_page_url=self._find_notero_link(attachments[item_id]),
                     library=self._library,
+                    collection_keys=collection_keys,
                 )
             )
         return parents, attachments

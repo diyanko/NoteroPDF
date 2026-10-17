@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .profiles import normalize_profile
+
 NOTION_TOKEN_PAGE_URL = "https://www.notion.so/developers/tokens"
 KEYRING_SERVICE = "noteropdf"
 KEYRING_USERNAME = "notion-personal-access-token"
@@ -20,9 +22,11 @@ class CredentialStore:
         service: str = KEYRING_SERVICE,
         username: str = KEYRING_USERNAME,
         keyring_module: Any | None = None,
+        profile: str | None = None,
     ):
+        profile = normalize_profile(profile)
         self._service = service
-        self._username = username
+        self._username = f"{username}:profile:{profile}" if profile else username
         self._keyring = keyring_module
 
     def _keyring_module(self) -> Any:

@@ -76,6 +76,24 @@ and select its Notero database. Existing connections continue using the personal
 library until you change them. Sync history stays separate for each group, and
 an unavailable group stops the run instead of falling back to another library.
 
+To keep several connections, give each one a name:
+
+```bash
+noteropdf connect --profile lab
+noteropdf sync --profile lab
+noteropdf doctor --profile lab
+```
+
+Each named connection remembers its own Zotero library, Notion database, PDF
+property, token, and sync history. Tokens stay in separate accounts in your
+operating system's credential store. You can use a different Notion workspace
+for each connection. Every command runs only the connection you selected.
+
+Leaving out `--profile` (or using `--profile default`) keeps your existing
+connection, token, and history. New names require `connect` first; a misspelled
+name stops sync instead of using another connection. Names use 1–32 lowercase
+letters, digits, or hyphens, start with a letter, and end with a letter or digit.
+
 ## Commands
 
 | Command | Purpose |
@@ -91,13 +109,37 @@ an unavailable group stops the run instead of falling back to another library.
 | `noteropdf --version` | Show the installed version. |
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
+Add `--profile NAME` to any command to use a named connection.
+
+To try a smaller batch, select collections or individual parent items from the
+connected Zotero library:
+
+```bash
+noteropdf sync --collection-key ABCD1234
+noteropdf sync --item-key EFGH5678 --item-key IJKL9012
+noteropdf sync --collection-key ABCD1234 --item-key EFGH5678 --apply
+```
+
+Keys are the eight uppercase letters or digits in Zotero item and collection
+links, such as `zotero://select/library/items/EFGH5678`. Use the parent paper's
+key, not a PDF attachment's key. Repeat a flag to include more collections or
+items. Combining both flags selects only the requested items directly inside
+the requested collections. Subcollections are not included automatically.
+Filters apply to this run only; omitting them syncs the whole connected library.
+
+A missing item or a collection with no readable parent items stops the run;
+check its key and the selected library. Empty collections also stop the run.
+The preview and confirmed upload use the same filters. Safety checks still
+cover the whole library: an item outside your selection sharing a Notion target
+blocks that target too.
 
 When an item has several PDFs, sync skips it until you explicitly choose one.
 Find the parent item and attachment keys in Zotero's item links, then run
 `noteropdf pdf ITEM` to see available local PDF attachment keys. Save your choice
 with `noteropdf pdf ITEM ATTACHMENT`, then run sync to review it. Choices stay
 separate for personal and group libraries, and the selection command only changes
-local preferences. It never uploads or changes Zotero or Notion. If the chosen
+local preferences. Add `--profile lab` to inspect or save choices in a named
+connection. It never uploads or changes Zotero or Notion. If the chosen
 attachment disappears, moves, or stops being a local PDF, sync skips the item
 until you choose again or clear the choice. Editing the contents of the chosen
 PDF follows the normal preview and confirmation workflow.
