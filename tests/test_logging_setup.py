@@ -31,3 +31,27 @@ def test_diagnostic_log_is_rotating_and_owner_only(tmp_path: Path):
             handler.close()
         for handler in original_handlers:
             root.addHandler(handler)
+
+
+def test_named_console_scopes_engine_recovery_without_mutating_record():
+    from noteropdf.logging_setup import _UserConsoleFormatter
+
+    record = logging.LogRecord(
+        "noteropdf.sync",
+        logging.WARNING,
+        "",
+        0,
+        "Sync failed: %s",
+        ("Run `noteropdf connect` to replace the token.",),
+        None,
+    )
+    formatter = _UserConsoleFormatter(use_color=False, verbose=False, profile="lab")
+    assert formatter.format(record) == (
+        "[WARN] Sync failed: Run `noteropdf connect --profile lab` to replace the token."
+    )
+    assert (
+        record.getMessage()
+        == "Sync failed: Run `noteropdf connect` to replace the token."
+    )
+    default = _UserConsoleFormatter(use_color=False, verbose=False)
+    assert default.format(record) == f"[WARN] {record.getMessage()}"

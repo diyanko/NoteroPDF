@@ -30,6 +30,17 @@ describes direction, not promised features or release dates.
    Decide after a concrete user need emerges; reuse the CLI's core operations
    and safety checks while keeping the cross-platform CLI available.
 
+## Easier macOS installation
+
+Consider a maintained Homebrew tap after the current CLI is integrated and its
+first-run journey is verified. Keep PyPI and pipx as the cross-platform install
+path. Follow [Homebrew's Python formula guidance](https://docs.brew.sh/Language-Specific-Formulae#python):
+use `virtualenv_install_with_resources`, declare the Python runtime, and include
+all transitive Python dependencies as immutable resources with verified checksums.
+Test useful installed behavior in an isolated environment, including a preview
+that cannot write, rather than checking only that the executable starts.
+A formula, tap, and publishing automation remain future work.
+
 ## How work moves forward
 
 Use GitHub issues for substantial ideas and reproducible bugs. Choose the smallest
