@@ -64,17 +64,5 @@ jobs:
       - name: Install check and build tooling
         run: python -m pip install ".[test,qa,build]"
 
-      - name: Run static checks and tests
-        run: |
-          ruff check .
-          ruff format --check noteropdf tests
-          mypy
-          python -m pytest --cov=noteropdf --cov-report=term-missing --cov-fail-under=75 -q
-
-      - name: Build distributions
-        run: python -m build
-
-      - name: Validate distribution metadata and contents
-        run: |
-          python -m twine check --strict dist/*
-          check-wheel-contents dist/*.whl
+      - name: Run project checks and validate distributions
+        run: python scripts/check.py --package

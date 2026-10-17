@@ -16,6 +16,9 @@ jobs:
   build-dists:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -49,6 +52,15 @@ jobs:
             echo "Release tags must point to a commit on main." >&2
             exit 1
           }
+
+      - name: Require successful CI for the exact release commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+            -f branch=main -f event=push -f head_sha="$GITHUB_SHA" -f per_page=1 \
+            | python scripts/check_release_ci.py "$GITHUB_SHA"
 
       - name: Install build tooling
         run: python -m pip install ".[build]"
