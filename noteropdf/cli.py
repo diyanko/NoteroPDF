@@ -1055,6 +1055,9 @@ def _run_sources(
     profile = normalize_profile(profile)
     print(f"[INFO] Connection: {profile or 'default'}")
     cfg = source_files_config(_load_ready_config(profile), property_name)
+    retry_property = (
+        property_name if property_name == "Source files" else "<your files field>"
+    )
     engine = SourceFilesEngine(cfg, item_keys=item_keys)
     try:
         preview = engine.sync(apply=False)
@@ -1093,11 +1096,15 @@ def _run_sources(
             )
             return 0
         command = _sources_command(
-            item_keys, property_name, profile, details=details, apply=True
+            item_keys, retry_property, profile, details=details, apply=True
         )
         print(
             f"[NEXT] Preview only. In {_source_shell()}, run `{command}` to apply this selection."
         )
+        if retry_property != property_name:
+            print(
+                "[NEXT] Replace <your files field> with the same field name you selected."
+            )
         return 1 if blockers else 2
     apply_cfg = source_files_config(_load_ready_config(profile), property_name)
     if apply_cfg != cfg:
@@ -1121,11 +1128,15 @@ def _run_sources(
     _print_source_outcomes(result, preview=False, details=details, profile=profile)
     if failed or result_blockers:
         command = _sources_command(
-            item_keys, property_name, profile, details=details, apply=False
+            item_keys, retry_property, profile, details=details, apply=False
         )
         print(
             f"[NEXT] In {_source_shell()}, run `{command}` to review the current state before trying again."
         )
+        if retry_property != property_name:
+            print(
+                "[NEXT] Replace <your files field> with the same field name you selected."
+            )
     return 1 if failed or result_blockers or blockers else 0
 
 

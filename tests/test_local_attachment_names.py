@@ -48,8 +48,11 @@ def test_pdf_recovery_keeps_exact_item_and_profile(capsys):
 @pytest.mark.parametrize(
     "input_tty,output_tty", [(False, False), (True, False), (False, True), (True, True)]
 )
+@pytest.mark.parametrize(
+    "property_name", ["Source files", "private-schema", "private\nschema"]
+)
 def test_source_preview_shows_filename_only_in_local_terminals(
-    monkeypatch, capsys, input_tty, output_tty
+    monkeypatch, capsys, input_tty, output_tty, property_name
 ):
     from types import SimpleNamespace
 
@@ -94,3 +97,9 @@ def test_source_preview_shows_filename_only_in_local_terminals(
     assert ("data.xlsx" in output) == (input_tty and output_tty)
     assert "/private/folder" not in output
     assert "private-page" not in output
+
+    if property_name != "Source files":
+        assert property_name not in output
+        if not input_tty:
+            assert "<your files field>" in output
+            assert "same field name" in output

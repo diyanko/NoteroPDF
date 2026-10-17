@@ -209,8 +209,9 @@ local attachments and uses the same exact Notero links as PDF sync. Use
 `--profile NAME` for a saved connection and `--details` for every file and outcome.
 The preview shows attachment keys, file types, and sizes; filenames appear only
 when both input and output are interactive terminals. Retry instructions retain
-your connection, selected papers, field, and detail preference. Windows retry
-commands are labeled for PowerShell.
+your connection, selected papers, and detail preference. Custom field names
+use a placeholder to keep private database labels out of shared output; replace
+it with the same field name. Windows retry commands are labeled for PowerShell.
 
 Results distinguish verified file updates from skipped files and failed uploads.
 If a response or local history save fails after attachment, files may already
