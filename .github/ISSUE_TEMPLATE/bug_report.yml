@@ -1,0 +1,30 @@
+name: Bug report
+description: Report a reproducible problem with NoteroPDF.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Share only synthetic examples. Do not include tokens, paper titles,
+        page IDs, personal paths, or unreviewed diagnostic logs. Report security
+        issues privately using the repository's security policy.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Explain what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the command and a minimal example with private values removed.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Installation and environment
+      description: Include NoteroPDF version, OS, Python version, install method, and relevant Zotero or Notero versions.
+    validations:
+      required: true

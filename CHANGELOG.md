@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- unified local and CI validation with `python scripts/check.py` and optional package checks
+- required successful CI on the exact main-branch commit before release publication
+- documented solo maintenance, concurrent work, contributor reporting, and product direction
+
 ## 0.4.0 - 2026-08-09
 
 ### Added
