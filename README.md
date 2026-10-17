@@ -89,6 +89,18 @@ property, token, and sync history. Tokens stay in separate accounts in your
 operating system's credential store. You can use a different Notion workspace
 for each connection. Every command runs only the connection you selected.
 
+During `connect`, enter `back` to revisit a step, `cancel` to leave setup, or
+choose `edit` at the final review to change your choices. Nothing replaces your
+saved connection until you save the review. Replacement tokens are stored in
+the operating-system credential store under a new account; the previous token
+is kept intact if setup fails or is interrupted. A dedicated files property
+already created during setup remains in Notion if you cancel; setup does not
+upload papers or undo completed Notion changes.
+
+Saved connection settings upgrade when you save them with this version. An
+older NoteroPDF version will ask you to reconnect rather than use the wrong
+credential account.
+
 Leaving out `--profile` (or using `--profile default`) keeps your existing
 connection, token, and history. New names require `connect` first; a misspelled
 name stops sync instead of using another connection. Names use 1–32 lowercase

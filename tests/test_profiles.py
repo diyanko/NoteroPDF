@@ -210,6 +210,7 @@ def test_connect_creates_only_selected_profile(monkeypatch, isolated_paths):
         "_select_pdf_property",
         lambda notion, target, existing: SimpleNamespace(id="lab-pdf", name="PDF"),
     )
+    monkeypatch.setattr(cli, "_review_connection", lambda *args: True)
     assert cli._run_connect("lab") == 0
     assert chosen_accounts == ["lab"]
     assert config.load_local_settings().notion_data_source_id == "default-source"
@@ -378,3 +379,15 @@ def test_doctor_scopes_local_settings_recovery(monkeypatch, isolated_paths, caps
     output = capsys.readouterr().out
     assert "Run `noteropdf connect --profile lab` to create fresh settings." in output
     assert "`noteropdf connect`" not in output
+
+
+@pytest.mark.parametrize("profile,flag", [(None, ""), ("lab", " --profile lab")])
+@pytest.mark.parametrize("item", ["ITEM1234", "groups/123/ITEM1234"])
+def test_pdf_recovery_preserves_selected_connection_and_parent_key(profile, flag, item):
+    from noteropdf.profiles import recovery_guidance
+
+    message = "Choose it again with `noteropdf pdf`."
+    assert (
+        recovery_guidance(message, profile, item_key=item)
+        == f"Choose it again with `noteropdf pdf{flag} ITEM1234`."
+    )

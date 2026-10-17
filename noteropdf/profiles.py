@@ -29,7 +29,27 @@ def connect_command(profile: str | None = None) -> str:
     return shlex.join(arguments)
 
 
-def recovery_guidance(message: str, profile: str | None = None) -> str:
+def recovery_guidance(
+    message: str, profile: str | None = None, *, item_key: str | None = None
+) -> str:
     """Scope the standard reconnect instruction at the presentation boundary."""
     command = connect_command(profile)
-    return message.replace("`noteropdf connect`", f"`{command}`")
+    message = message.replace("`noteropdf connect`", f"`{command}`")
+    if item_key is not None:
+        match = re.fullmatch(r"(?:groups/[1-9][0-9]*/)?([A-Z0-9]{8})", item_key)
+        if match:
+            arguments = ["noteropdf", "pdf"]
+            selected_profile = normalize_profile(profile)
+            if selected_profile is not None:
+                arguments.extend(("--profile", selected_profile))
+            arguments.append(match[1])
+            message = message.replace("`noteropdf pdf`", f"`{shlex.join(arguments)}`")
+    return message
+
+
+def validate_credential_id(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        raise ValueError(
+            "The saved credential reference is invalid. Run `noteropdf connect` to reconnect."
+        )
+    return value

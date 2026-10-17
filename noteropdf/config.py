@@ -267,7 +267,11 @@ def load_app_config(
 ) -> AppConfig:
     profile = normalize_profile(profile)
     settings = load_local_settings(state_db_path, profile=profile)
-    credentials = credential_store or CredentialStore(profile=profile)
+    credentials = credential_store or (
+        CredentialStore(profile=profile, credential_id=settings.notion_credential_id)
+        if settings.notion_credential_id is not None
+        else CredentialStore(profile=profile)
+    )
     token, source = resolve_access_token(credentials)
     return build_app_config(
         settings,
