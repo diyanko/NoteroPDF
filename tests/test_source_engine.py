@@ -325,8 +325,13 @@ def test_no_matching_notero_link_never_uploads(journey):
     assert not actions
 
 
-def test_workspace_limit_is_enforced(journey):
+def test_workspace_limit_is_enforced(journey, monkeypatch):
     journey.notion.get_workspace_upload_limit_bytes = lambda: 1
+    monkeypatch.setattr(
+        SourceFilesEngine,
+        "_checked_digest",
+        lambda _file: pytest.fail("An oversized file should not be read."),
+    )
     rows, actions = preview(journey)
     assert rows[0].final_status == "FILE_TOO_LARGE"
     assert not actions

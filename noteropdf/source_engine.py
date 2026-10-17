@@ -293,25 +293,26 @@ class SourceFilesEngine(SyncEngine):
         limit = (
             notion.get_workspace_upload_limit_bytes() or self.DEFAULT_MAX_UPLOAD_BYTES
         )
+        if any(file.size > limit for file in files):
+            return [
+                self._row(
+                    item,
+                    Status.FILE_TOO_LARGE.value,
+                    error="A supporting file exceeds the workspace upload limit.",
+                    match=match,
+                )
+            ]
+        fingerprints = tuple((file, self._checked_digest(file)) for file in files)
         bundle_identity = sha256(
             (
-                repr(tuple((file, self._checked_digest(file)) for file in files))
+                repr(fingerprints)
                 + json.dumps(manifest, sort_keys=True, separators=(",", ":"))
             ).encode()
         ).hexdigest()
         plans: list[_Plan] = []
         changed: list[_Plan] = []
         names: set[str] = set()
-        for file in files:
-            if file.size > limit:
-                return [
-                    self._row(
-                        item,
-                        Status.FILE_TOO_LARGE.value,
-                        error="A source file exceeds the workspace upload limit.",
-                        match=match,
-                    )
-                ]
+        for file, digest in fingerprints:
             filename = Path(file.absolute_path).name
             if filename != filename.strip():
                 return [
@@ -334,7 +335,6 @@ class SourceFilesEngine(SyncEngine):
                 ]
             names.add(name.casefold())
             key = f"{item.sync_key}:{file.attachment_key}"
-            digest = self._checked_digest(file)
             action = PreviewAction(
                 key,
                 page_id,
