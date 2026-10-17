@@ -114,6 +114,7 @@ Add `--profile NAME` to any command to use a named connection.
 - Confirmation applies only the exact file/page actions in that preview.
 - A changed PDF or missing target page is skipped and must be previewed again.
 - A Notion PDF field changed after preview is skipped instead of overwritten.
+- Runs on this computer cannot write to the same Notion destination at the same time, even through different saved connections. A busy destination stops the run; preview again after the other run finishes.
 - Multiple or unknown files in the destination field are never removed.
 - Ambiguous PDF or Notion matches are skipped instead of guessed.
 - Library changes during scanning stop the run before uploads begin.

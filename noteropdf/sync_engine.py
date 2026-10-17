@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import AppConfig
+from .destination_lock import lock_destination
 from .models import CandidatePdf, SyncRow, ZoteroItem
 from .notion_client import (
     NotionApiError,
@@ -48,6 +50,11 @@ class UploadDecision:
 
 class SyncEngine:
     DEFAULT_MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
+
+    def _destination_lock(
+        self, data_source_id: str, property_id: str, *, apply: bool
+    ) -> AbstractContextManager[None]:
+        return lock_destination(data_source_id, property_id, apply=apply)
 
     def __init__(
         self,
@@ -455,55 +462,58 @@ class SyncEngine:
 
         ds_id = self._resolve_data_source()
         self._pdf_property_ref = self._resolved_pdf_property_ref()
-        notion.validate_pdf_property(ds_id, self._pdf_property_ref)
-        self._snapshot = notion.build_data_source_snapshot(
-            ds_id,
-            pdf_property=self._pdf_property_ref,
-        )
-        self._apply_writes = apply
-        self._preview_actions = {}
-        self._approved_actions = (
-            {action.zotero_item_key: action for action in approved_actions}
-            if approved_actions is not None
-            else None
-        )
-        self._match_cache = None
-        self._hash_cache = {}
+        with self._destination_lock(ds_id, self._pdf_property_ref, apply=apply):
+            notion.validate_pdf_property(ds_id, self._pdf_property_ref)
+            self._snapshot = notion.build_data_source_snapshot(
+                ds_id,
+                pdf_property=self._pdf_property_ref,
+            )
+            self._apply_writes = apply
+            self._preview_actions = {}
+            self._approved_actions = (
+                {action.zotero_item_key: action for action in approved_actions}
+                if approved_actions is not None
+                else None
+            )
+            self._match_cache = None
+            self._hash_cache = {}
 
-        rows: list[SyncRow] = []
-        eligible_items = [
-            item for item in items if selected_pdfs[item.sync_key][0] == Status.OK.value
-        ]
-        self._match_cache = self._build_match_cache(eligible_items)
-        total = len(items)
-        self._logger.debug("Starting sync run: total_parent_items=%s", total)
-        for idx, item in enumerate(items, start=1):
-            row = self._sync_one(
-                item,
-                selected_pdf=selected_pdfs[item.sync_key],
-            )
-            rows.append(row)
-            self._logger.debug(
-                "item=%s/%s status=%s action=%s key=%s page=%s title=%s",
-                idx,
-                total,
-                row.final_status,
-                row.action_taken,
-                item.sync_key,
-                row.notion_page_id or "-",
-                item.title or "",
-            )
-            if row.error_message:
-                self._logger.warning(
-                    "item=%s key=%s status=%s reason=%s",
-                    idx,
-                    item.sync_key,
-                    row.final_status,
-                    row.error_message,
+            rows: list[SyncRow] = []
+            eligible_items = [
+                item
+                for item in items
+                if selected_pdfs[item.sync_key][0] == Status.OK.value
+            ]
+            self._match_cache = self._build_match_cache(eligible_items)
+            total = len(items)
+            self._logger.debug("Starting sync run: total_parent_items=%s", total)
+            for idx, item in enumerate(items, start=1):
+                row = self._sync_one(
+                    item,
+                    selected_pdf=selected_pdfs[item.sync_key],
                 )
+                rows.append(row)
+                self._logger.debug(
+                    "item=%s/%s status=%s action=%s key=%s page=%s title=%s",
+                    idx,
+                    total,
+                    row.final_status,
+                    row.action_taken,
+                    item.sync_key,
+                    row.notion_page_id or "-",
+                    item.title or "",
+                )
+                if row.error_message:
+                    self._logger.warning(
+                        "item=%s key=%s status=%s reason=%s",
+                        idx,
+                        item.sync_key,
+                        row.final_status,
+                        row.error_message,
+                    )
 
-        self._logger.debug("Sync run completed: processed=%s", len(rows))
-        return rows
+            self._logger.debug("Sync run completed: processed=%s", len(rows))
+            return rows
 
     def preview_actions(self) -> tuple[PreviewAction, ...]:
         return tuple(self._preview_actions.values())
