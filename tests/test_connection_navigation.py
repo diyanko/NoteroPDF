@@ -4,6 +4,24 @@ import pytest
 
 from noteropdf import cli, config
 from noteropdf.auth import CredentialStore
+from noteropdf.cli import (
+    _authorize_notion as authorize_notion,
+)
+from noteropdf.cli import (
+    _review_connection as review_connection,
+)
+from noteropdf.cli import (
+    _select_pdf_property as select_pdf_property,
+)
+from noteropdf.cli import (
+    _select_target as select_target,
+)
+from noteropdf.cli import (
+    _select_zotero_directory as select_zotero_directory,
+)
+from noteropdf.cli import (
+    _select_zotero_library as select_zotero_library,
+)
 from noteropdf.models import ZoteroLibrary
 from noteropdf.notion_client import NotionApiError, NotionProperty, NotionTarget
 from noteropdf.settings import LocalSettings
@@ -301,3 +319,129 @@ def test_config_uses_one_settings_snapshot_for_token_and_destination(
     assert cfg.notion.data_source_id == "new-source"
     assert cfg.notion_token == "new-token"
     assert calls == [1]
+
+
+def test_token_back_skips_automatic_library_and_revisits_folder(setup, monkeypatch):
+    monkeypatch.setattr(cli, "_select_zotero_directory", select_zotero_directory)
+    monkeypatch.setattr(cli, "_select_zotero_library", select_zotero_library)
+    monkeypatch.setattr(cli, "_authorize_notion", authorize_notion)
+    monkeypatch.setattr(
+        cli.ZoteroRepository, "list_libraries", lambda: [ZoteroLibrary()]
+    )
+    monkeypatch.setattr(cli.webbrowser, "open", lambda *args, **kwargs: False)
+    answers = iter(["yes", "no", "cancel"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "back")
+    old_accounts = setup.accounts.copy()
+    assert cli._run_connect("lab") == 0
+    assert sum("Use the saved Zotero data folder" in prompt for prompt in prompts) == 2
+    assert "Use the saved Zotero data folder" in prompts[-1]
+    assert config.load_local_settings(profile="lab") == setup.old
+    assert setup.accounts == old_accounts
+
+
+def test_review_back_skips_saved_property_and_revisits_database(setup, monkeypatch):
+    targets = [
+        NotionTarget("old-source", "Saved"),
+        NotionTarget("other-source", "Other"),
+    ]
+    selected = NotionProperty("old-pdf", "PDF", "files")
+    notion = SimpleNamespace(
+        ping=lambda: None,
+        close=lambda: None,
+        list_accessible_data_sources=lambda: targets,
+        resolve_property=lambda *args: selected,
+    )
+    monkeypatch.setattr(cli, "NotionClient", lambda **kwargs: notion)
+    monkeypatch.setattr(cli, "_select_target", select_target)
+    monkeypatch.setattr(cli, "_select_pdf_property", select_pdf_property)
+    monkeypatch.setattr(cli, "_review_connection", review_connection)
+    answers = iter(["1", "back", "cancel"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    old_accounts = setup.accounts.copy()
+    assert cli._run_connect("lab") == 0
+    assert (
+        sum("Choose the database Notero manages" in prompt for prompt in prompts) == 2
+    )
+    assert "Choose the database Notero manages" in prompts[-1]
+    assert config.load_local_settings(profile="lab") == setup.old
+    assert setup.accounts == old_accounts
+
+
+@pytest.mark.parametrize("change_folder", [False, True])
+def test_first_run_detected_folder_can_be_cancelled_or_changed_on_back(
+    setup, monkeypatch, tmp_path, change_folder
+):
+    cli._save_connection(LocalSettings(), "lab")
+    setup.accounts.clear()
+    monkeypatch.setattr(cli, "_select_zotero_directory", select_zotero_directory)
+    monkeypatch.setattr(cli, "_select_zotero_library", select_zotero_library)
+    monkeypatch.setattr(cli, "_authorize_notion", authorize_notion)
+    monkeypatch.setattr(
+        cli, "detect_zotero_data_dir", lambda: setup.old.zotero_data_dir
+    )
+    monkeypatch.setattr(
+        cli.ZoteroRepository, "list_libraries", lambda: [ZoteroLibrary()]
+    )
+    monkeypatch.setattr(cli.webbrowser, "open", lambda *args, **kwargs: False)
+    alternate = tmp_path / "alternate"
+    alternate.mkdir()
+    (alternate / "storage").mkdir()
+    (alternate / "zotero.sqlite").touch()
+    answers = iter(["no", str(alternate)] if change_folder else ["cancel"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    secrets = iter(["back", "cancel"] if change_folder else ["back"])
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: next(secrets))
+    assert cli._run_connect("lab") == 0
+    assert "Use the saved Zotero data folder" in prompts[0]
+    if change_folder:
+        assert "Zotero data folder" in prompts[1]
+    assert config.load_local_settings(profile="lab") == LocalSettings()
+    assert setup.accounts == {}
+
+
+def test_review_back_skips_single_database_to_token_prompt(setup, monkeypatch):
+    selected = NotionProperty("old-pdf", "PDF", "files")
+    notion = SimpleNamespace(
+        ping=lambda: None,
+        close=lambda: None,
+        list_accessible_data_sources=lambda: [NotionTarget("old-source", "Saved")],
+        resolve_property=lambda *args: selected,
+    )
+    monkeypatch.setattr(cli, "NotionClient", lambda **kwargs: notion)
+    monkeypatch.setattr(cli, "_authorize_notion", authorize_notion)
+    monkeypatch.setattr(cli, "_select_target", select_target)
+    monkeypatch.setattr(cli, "_select_pdf_property", select_pdf_property)
+    monkeypatch.setattr(cli, "_review_connection", review_connection)
+    answers = iter(["yes", "back", "cancel"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    old_accounts = setup.accounts.copy()
+    assert cli._run_connect("lab") == 0
+    assert sum("Use the saved Notion token" in prompt for prompt in prompts) == 2
+    assert "Use the saved Notion token" in prompts[-1]
+    assert config.load_local_settings(profile="lab") == setup.old
+    assert setup.accounts == old_accounts

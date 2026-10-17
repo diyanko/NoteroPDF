@@ -253,9 +253,13 @@ def _select_zotero_directory(existing: LocalSettings) -> Path:
             default = ""
 
 
-def _select_zotero_library(existing: LocalSettings) -> ZoteroLibrary:
+def _select_zotero_library(
+    existing: LocalSettings, *, revisit: bool = False
+) -> ZoteroLibrary:
     libraries = ZoteroRepository.list_libraries()
     if len(libraries) == 1 and existing.zotero_group_id is None:
+        if revisit:
+            raise _SetupBack
         print("[OK] Using Zotero: My Library")
         return libraries[0]
     if existing.zotero_group_id is not None and not any(
@@ -303,7 +307,7 @@ def _authorize_notion(previous_token: str | None) -> tuple[str, str | None]:
     return token, token
 
 
-def _select_target(notion: NotionClient) -> NotionTarget:
+def _select_target(notion: NotionClient, *, revisit: bool = False) -> NotionTarget:
     targets = notion.list_accessible_data_sources()
     if not targets:
         raise SetupRequired(
@@ -311,6 +315,8 @@ def _select_target(notion: NotionClient) -> NotionTarget:
             "the token belongs to the workspace containing the Notero database."
         )
     if len(targets) == 1:
+        if revisit:
+            raise _SetupBack
         print(f"[OK] Using Notion database: {_target_choice_label(targets[0])}")
         return targets[0]
     if not _stdin_interactive():
@@ -335,6 +341,8 @@ def _select_pdf_property(
     notion: NotionClient,
     target: NotionTarget,
     existing: LocalSettings | None = None,
+    *,
+    revisit: bool = False,
 ) -> NotionProperty:
     if (
         existing is not None
@@ -345,9 +353,13 @@ def _select_pdf_property(
             target.data_source_id, existing.pdf_property_id
         )
         if connected is not None and connected.type == "files":
+            if revisit:
+                raise _SetupBack
             return connected
 
     pdf = notion.find_files_property(target.data_source_id, "NoteroPDF PDF")
+    if pdf is not None and revisit:
+        raise _SetupBack
     if pdf is None:
         if not _stdin_interactive():
             raise SetupRequired(
@@ -419,6 +431,7 @@ def _run_connect(profile: str | None = None) -> int:
     saved_token = previous_token
     draft = existing
     step = 0
+    revisiting = False
     notion = None
     new_token = None
     staged_id = None
@@ -430,7 +443,11 @@ def _run_connect(profile: str | None = None) -> int:
                     zotero_dir = _select_zotero_directory(draft)
                     draft = replace(draft, zotero_data_dir=zotero_dir)
                 elif step == 1:
-                    library = _select_zotero_library(draft)
+                    library = (
+                        _select_zotero_library(draft, revisit=True)
+                        if revisiting
+                        else _select_zotero_library(draft)
+                    )
                     draft = replace(draft, zotero_group_id=library.group_id)
                 elif step == 2:
                     if notion is not None:
@@ -451,15 +468,27 @@ def _run_connect(profile: str | None = None) -> int:
                         continue
                 elif step == 3:
                     assert notion is not None
-                    target = _select_target(notion)
+                    target = (
+                        _select_target(notion, revisit=True)
+                        if revisiting
+                        else _select_target(notion)
+                    )
                 elif step == 4:
                     assert notion is not None
-                    pdf = _select_pdf_property(notion, target, draft)
+                    pdf = (
+                        _select_pdf_property(notion, target, draft, revisit=True)
+                        if revisiting
+                        else _select_pdf_property(notion, target, draft)
+                    )
                 elif not _review_connection(library, target, pdf):
                     step = 0
                     continue
+                revisiting = False
                 step += 1
             except _SetupBack:
+                # Walk past automatic choices until a real prompt can change
+                # the previous decision, rather than bouncing forward again.
+                revisiting = True
                 step = max(0, step - 1)
                 print("[INFO] Returned to the previous setup step.")
         if new_token is not None and new_token != saved_token:
