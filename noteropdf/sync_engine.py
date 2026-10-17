@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import AppConfig
-from .models import CandidatePdf, SyncRow, ZoteroItem
+from .models import CandidatePdf, SyncRow, SyncScope, ZoteroItem
 from .notion_client import (
     NotionApiError,
     NotionClient,
@@ -438,6 +438,7 @@ class SyncEngine:
         *,
         apply: bool = False,
         approved_actions: tuple[PreviewAction, ...] | None = None,
+        scope: SyncScope | None = None,
     ) -> list[SyncRow]:
         if apply and approved_actions is None:
             raise ValueError("Applying a sync requires approved preview actions.")
@@ -446,7 +447,8 @@ class SyncEngine:
         # Notion upload work.
         zotero = self._require_zotero()
         notion = self._require_notion()
-        items = list(zotero.all_items())
+        library_items = list(zotero.all_items())
+        items = (scope or SyncScope()).select(library_items)
         selected_pdfs = {
             item.sync_key: zotero.select_candidate_pdf(item) for item in items
         }
@@ -471,10 +473,9 @@ class SyncEngine:
         self._hash_cache = {}
 
         rows: list[SyncRow] = []
-        eligible_items = [
-            item for item in items if selected_pdfs[item.sync_key][0] == Status.OK.value
-        ]
-        self._match_cache = self._build_match_cache(eligible_items)
+        # A target shared with an unselected item is still ambiguous, including
+        # when that item has no local PDF. Scope must never weaken ownership.
+        self._match_cache = self._build_match_cache(library_items)
         total = len(items)
         self._logger.debug("Starting sync run: total_parent_items=%s", total)
         for idx, item in enumerate(items, start=1):

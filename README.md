@@ -89,6 +89,28 @@ an unavailable group stops the run instead of falling back to another library.
 
 Add `--verbose` for technical details or `--no-color` for plain terminal output.
 
+To try a smaller batch, select collections or individual parent items from the
+connected Zotero library:
+
+```bash
+noteropdf sync --collection-key ABCD1234
+noteropdf sync --item-key EFGH5678 --item-key IJKL9012
+noteropdf sync --collection-key ABCD1234 --item-key EFGH5678 --apply
+```
+
+Keys are the eight uppercase letters or digits in Zotero item and collection
+links, such as `zotero://select/library/items/EFGH5678`. Use the parent paper's
+key, not a PDF attachment's key. Repeat a flag to include more collections or
+items. Combining both flags selects only the requested items directly inside
+the requested collections. Subcollections are not included automatically.
+Filters apply to this run only; omitting them syncs the whole connected library.
+
+A missing item or a collection with no readable parent items stops the run;
+check its key and the selected library. Empty collections also stop the run.
+The preview and confirmed upload use the same filters. Safety checks still
+cover the whole library: an item outside your selection sharing a Notion target
+blocks that target too.
+
 ## Safe by Design
 
 - The preview never writes to Notion.

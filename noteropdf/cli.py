@@ -30,7 +30,7 @@ from .config import (
     validate_zotero_data_dir,
 )
 from .logging_setup import setup_run_logging
-from .models import ZoteroLibrary
+from .models import SyncScope, ZoteroLibrary, validate_zotero_key
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
 from .settings import LocalSettings, save_settings
 from .state_store import StateStore
@@ -102,6 +102,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="Apply the preview without an interactive confirmation",
+    )
+    sync.add_argument(
+        "--collection-key",
+        action="append",
+        type=validate_zotero_key,
+        default=[],
+        metavar="KEY",
+        help="Include direct members of this collection; repeat for more collections",
+    )
+    sync.add_argument(
+        "--item-key",
+        action="append",
+        type=validate_zotero_key,
+        default=[],
+        metavar="KEY",
+        help="Include this parent item; repeat for more items",
     )
     connect = sub.add_parser(
         "connect",
@@ -446,7 +462,8 @@ def _blocking_issue_count(rows) -> int:
     return sum(1 for row in rows if row.final_status in _BLOCKING_SYNC_STATUSES)
 
 
-def _run_sync(*, apply_without_prompt: bool) -> int:
+def _run_sync(*, apply_without_prompt: bool, scope: SyncScope | None = None) -> int:
+    scope = scope or SyncScope()
     try:
         preview_cfg = _load_ready_config()
     except SetupRequired:
@@ -459,7 +476,7 @@ def _run_sync(*, apply_without_prompt: bool) -> int:
     engine = SyncEngine(preview_cfg)
     try:
         print("[INFO] Scanning Zotero and Notion...")
-        preview = engine.sync(apply=False)
+        preview = engine.sync(apply=False, scope=scope)
         approved_actions = engine.preview_actions()
     finally:
         engine.close()
@@ -506,6 +523,7 @@ def _run_sync(*, apply_without_prompt: bool) -> int:
         result = engine.sync(
             apply=True,
             approved_actions=approved_actions,
+            scope=scope,
         )
     finally:
         engine.close()
@@ -621,6 +639,10 @@ def main(argv: list[str] | None = None) -> int:
         if command == "sync":
             return _run_sync(
                 apply_without_prompt=bool(getattr(args, "apply", False)),
+                scope=SyncScope(
+                    collection_keys=tuple(getattr(args, "collection_key", ())),
+                    item_keys=tuple(getattr(args, "item_key", ())),
+                ),
             )
         parser.error(f"unknown command: {command}")
         return 2

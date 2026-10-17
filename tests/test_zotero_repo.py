@@ -624,3 +624,24 @@ def test_group_discovery_rejects_ambiguous_responses(monkeypatch, records, total
     with pytest.raises(RuntimeError):
         ZoteroRepository.list_libraries()
     assert session.closed
+
+
+def test_collection_membership_comes_from_same_snapshot(tmp_path, monkeypatch):
+    record = _api_parent_record()
+    record["data"]["collections"] = ["COLLECT1", "COLLECT2"]
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse([record])])
+    repo = ZoteroRepository(tmp_path, tmp_path)
+    assert repo.all_items()[0].collection_keys == ("COLLECT1", "COLLECT2")
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("collections", [None, "COLLECT1", [1], ["invalid1"], ["../x"]])
+def test_invalid_collection_membership_stops_snapshot(
+    tmp_path, monkeypatch, collections
+):
+    record = _api_parent_record()
+    record["data"]["collections"] = collections
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse([record])])
+    with pytest.raises(RuntimeError, match="invalid collection membership"):
+        ZoteroRepository(tmp_path, tmp_path)
+    assert session.closed

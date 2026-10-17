@@ -18,7 +18,7 @@ from noteropdf.cli import (
     _select_zotero_library,
     main,
 )
-from noteropdf.models import SyncRow, ZoteroLibrary
+from noteropdf.models import SyncRow, SyncScope, ZoteroLibrary
 from noteropdf.notion_client import (
     NotionApiError,
     NotionProperty,
@@ -73,7 +73,7 @@ def test_main_without_command_runs_sync(monkeypatch, tmp_path: Path):
         "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
     )
     assert main([]) == 0
-    assert calls == [{"apply_without_prompt": False}]
+    assert calls == [{"apply_without_prompt": False, "scope": SyncScope()}]
 
 
 def test_main_reports_generic_cancellation(monkeypatch, tmp_path: Path, caplog):
@@ -193,7 +193,11 @@ def test_rejected_saved_zotero_folder_is_not_auto_selected(monkeypatch, tmp_path
     assert selected == replacement.resolve()
 
 
-def test_interactive_sync_applies_only_actions_from_preview(monkeypatch):
+@pytest.mark.parametrize(
+    "scope",
+    [SyncScope(), SyncScope(collection_keys=("ABCD1234",), item_keys=("EFGH5678",))],
+)
+def test_interactive_sync_applies_only_actions_from_preview(monkeypatch, scope):
     preview_row = _row("preview_upload:first_sync")
     result_row = _row("upload_attach:first_sync")
     approved = (PreviewAction("ABC", "page", "paper.pdf", 10, 20, "digest"),)
@@ -220,11 +224,12 @@ def test_interactive_sync_applies_only_actions_from_preview(monkeypatch):
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
     monkeypatch.setattr("noteropdf.cli._prompt_yes_no", lambda *args, **kwargs: True)
 
-    assert _run_sync(apply_without_prompt=False) == 0
-    assert calls[0].kwargs == {"apply": False}
+    assert _run_sync(apply_without_prompt=False, scope=scope) == 0
+    assert calls[0].kwargs == {"apply": False, "scope": scope}
     assert calls[1].kwargs == {
         "apply": True,
         "approved_actions": approved,
+        "scope": scope,
     }
 
 
@@ -518,8 +523,9 @@ def test_changed_connection_blocks_apply_before_opening_engine(
         def __init__(self, config):
             engines.append(config)
 
-        def sync(self, *, apply):
+        def sync(self, *, apply, scope):
             assert not apply
+            assert scope == SyncScope()
             return [_row("preview_upload:first_sync")]
 
         def preview_actions(self):
@@ -532,3 +538,46 @@ def test_changed_connection_blocks_apply_before_opening_engine(
     monkeypatch.setattr("noteropdf.cli.SyncEngine", Engine)
     assert _run_sync(apply_without_prompt=True) == 1
     assert engines == [cfg]
+
+
+def test_sync_filters_are_repeatable_and_passed_to_workflow(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        "noteropdf.cli._run_sync", lambda **kwargs: calls.append(kwargs) or 0
+    )
+    monkeypatch.setattr(
+        "noteropdf.cli.setup_run_logging", lambda *args, **kwargs: tmp_path / "log"
+    )
+    assert (
+        main(
+            [
+                "sync",
+                "--collection-key",
+                "ABCD1234",
+                "--collection-key",
+                "EFGH5678",
+                "--item-key",
+                "IJKL9012",
+                "--item-key",
+                "MNOP3456",
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "apply_without_prompt": True,
+            "scope": SyncScope(("ABCD1234", "EFGH5678"), ("IJKL9012", "MNOP3456")),
+        }
+    ]
+
+
+@pytest.mark.parametrize("flag", ["--collection-key", "--item-key"])
+@pytest.mark.parametrize(
+    "key", ["", "abcD1234", "ABCD123", "ABCD12345", "ABCD/123", "ABCD12é4"]
+)
+def test_sync_filter_keys_reject_invalid_input_before_setup(flag, key):
+    with pytest.raises(SystemExit) as exc:
+        _build_parser().parse_args(["sync", flag, key])
+    assert exc.value.code == 2

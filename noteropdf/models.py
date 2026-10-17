@@ -1,6 +1,50 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+
+def validate_zotero_key(value: str) -> str:
+    if not re.fullmatch(r"[A-Z0-9]{8}", value):
+        raise ValueError("Zotero keys must be exactly 8 uppercase letters or digits.")
+    return value
+
+
+@dataclass(frozen=True)
+class SyncScope:
+    """An explicit per-run selection within one complete library snapshot."""
+
+    collection_keys: tuple[str, ...] = ()
+    item_keys: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for key in (*self.collection_keys, *self.item_keys):
+            validate_zotero_key(key)
+
+    def select(self, items: list[ZoteroItem]) -> list[ZoteroItem]:
+        requested_items = set(self.item_keys)
+        requested_collections = set(self.collection_keys)
+        available_items = {item.key for item in items}
+        if requested_items - available_items:
+            raise ValueError(
+                "A selected item was not found among the selected library's parent items. "
+                "Check the item key and library."
+            )
+        available_collections = {key for item in items for key in item.collection_keys}
+        if requested_collections - available_collections:
+            raise ValueError(
+                "A selected collection has no readable parent items in this library. "
+                "Check the collection key and library."
+            )
+        return [
+            item
+            for item in items
+            if (not requested_items or item.key in requested_items)
+            and (
+                not requested_collections
+                or not requested_collections.isdisjoint(item.collection_keys)
+            )
+        ]
 
 
 @dataclass(frozen=True)
@@ -41,6 +85,7 @@ class ZoteroItem:
     zotero_uri: str
     notero_page_url: str | None
     library: ZoteroLibrary = ZoteroLibrary()
+    collection_keys: tuple[str, ...] = ()
 
     @property
     def sync_key(self) -> str:
