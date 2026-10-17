@@ -445,3 +445,82 @@ def test_review_back_skips_single_database_to_token_prompt(setup, monkeypatch):
     assert "Use the saved Notion token" in prompts[-1]
     assert config.load_local_settings(profile="lab") == setup.old
     assert setup.accounts == old_accounts
+
+
+@pytest.mark.parametrize("close_error", [RuntimeError, KeyboardInterrupt])
+def test_client_close_failure_preserves_save_error_and_cleans_only_staged_account(
+    setup, monkeypatch, close_error
+):
+    old_accounts = setup.accounts.copy()
+
+    def fail_close():
+        raise close_error("synthetic close failure")
+
+    monkeypatch.setattr(
+        cli,
+        "NotionClient",
+        lambda **kwargs: SimpleNamespace(ping=lambda: None, close=fail_close),
+    )
+
+    def fail_save(*args):
+        raise OSError("synthetic save failure")
+
+    monkeypatch.setattr(cli, "_save_connection", fail_save)
+    with pytest.raises(OSError, match="synthetic save failure"):
+        cli._run_connect("lab")
+    assert config.load_local_settings(profile="lab") == setup.old
+    assert setup.accounts == old_accounts
+
+
+@pytest.mark.parametrize("interrupted_commit", [False, True])
+def test_client_close_failure_never_discards_activated_credential(
+    setup, monkeypatch, interrupted_commit
+):
+    def fail_close():
+        raise RuntimeError("synthetic close failure")
+
+    monkeypatch.setattr(
+        cli,
+        "NotionClient",
+        lambda **kwargs: SimpleNamespace(ping=lambda: None, close=fail_close),
+    )
+    if interrupted_commit:
+        save = cli._save_connection
+
+        def save_then_interrupt(*args):
+            save(*args)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(cli, "_save_connection", save_then_interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            cli._run_connect("lab")
+    else:
+        assert cli._run_connect("lab") == 0
+    active = config.load_local_settings(profile="lab")
+    assert active.notion_credential_id is not None
+    assert (
+        setup.credentials("lab", credential_id=active.notion_credential_id).load()
+        == "new-token"
+    )
+    assert setup.credentials("lab").load() == "old-token"
+
+
+def test_interrupt_during_close_after_success_preserves_committed_connection(
+    setup, monkeypatch
+):
+    def fail_close():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        cli,
+        "NotionClient",
+        lambda **kwargs: SimpleNamespace(ping=lambda: None, close=fail_close),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        cli._run_connect("lab")
+    active = config.load_local_settings(profile="lab")
+    assert (
+        setup.credentials("lab", credential_id=active.notion_credential_id).load()
+        == "new-token"
+    )
+    assert setup.credentials("lab").load() == "old-token"
