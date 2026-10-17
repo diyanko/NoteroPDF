@@ -387,6 +387,7 @@ def test_replacement_token_is_not_saved_before_database_selection(
         "noteropdf.cli.load_local_settings", lambda **_kwargs: LocalSettings()
     )
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr("noteropdf.cli._stdout_interactive", lambda: True)
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
     )
@@ -448,6 +449,7 @@ def test_connect_replaces_a_rejected_saved_token_in_one_run(
         "noteropdf.cli.load_local_settings", lambda **_kwargs: LocalSettings()
     )
     monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: True)
+    monkeypatch.setattr("noteropdf.cli._stdout_interactive", lambda: True)
     monkeypatch.setattr(
         "noteropdf.cli._select_zotero_directory", lambda _settings: tmp_path
     )

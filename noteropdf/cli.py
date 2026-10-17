@@ -31,7 +31,7 @@ from .config import (
     load_local_settings,
     validate_zotero_data_dir,
 )
-from .logging_setup import setup_run_logging
+from .logging_setup import setup_console_logging, setup_run_logging
 from .models import PdfSelection, SyncRow, SyncScope, ZoteroLibrary, validate_zotero_key
 from .notion_client import NotionApiError, NotionClient, NotionProperty, NotionTarget
 from .profiles import connect_command as _connect_command
@@ -213,6 +213,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _stdin_interactive() -> bool:
     return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
+def _stdout_interactive() -> bool:
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
 class _SetupBack(Exception):
@@ -475,7 +479,7 @@ def _review_connection(
 
 
 def _run_connect(profile: str | None = None) -> int:
-    if not _stdin_interactive():
+    if not (_stdin_interactive() and _stdout_interactive()):
         raise SetupRequired("Connect requires an interactive terminal.")
     profile = normalize_profile(profile)
     print(f"NoteroPDF connection: {profile or 'default'}")
@@ -795,7 +799,7 @@ def _run_sync(
     try:
         preview_cfg = _load_ready_config(profile)
     except SetupRequired:
-        if profile is not None or not _stdin_interactive():
+        if profile is not None or not (_stdin_interactive() and _stdout_interactive()):
             raise
         print("[INFO] First, connect Zotero and Notion.")
         _run_connect(profile)
@@ -889,9 +893,12 @@ def _run_doctor(profile: str | None = None) -> int:
     ready = True
     try:
         settings = load_local_settings(profile=profile)
-    except (OSError, sqlite3.Error, ValueError) as exc:
+    except (OSError, sqlite3.Error, ValueError):
         print(
-            f"- [FAIL] Local settings cannot be read: {recovery_guidance(str(exc), profile)}"
+            recovery_guidance(
+                "- [FAIL] Local settings cannot be read. Run `noteropdf connect` to create fresh settings.",
+                profile,
+            )
         )
         settings = LocalSettings()
         ready = False
@@ -902,10 +909,12 @@ def _run_doctor(profile: str | None = None) -> int:
         ready = False
     else:
         try:
-            validated = validate_zotero_data_dir(Path(zotero_dir))
-            print(f"- [OK] Zotero data folder: {validated}")
-        except ValueError as exc:
-            print(f"- [FAIL] {recovery_guidance(str(exc), profile)}")
+            validate_zotero_data_dir(Path(zotero_dir))
+            print("- [OK] Zotero data folder is available.")
+        except (OSError, ValueError):
+            print(
+                "- [FAIL] Zotero data folder is unavailable. Check Zotero and reconnect."
+            )
             ready = False
 
     try:
@@ -914,16 +923,17 @@ def _run_doctor(profile: str | None = None) -> int:
             if settings.notion_credential_id is not None
             else _credential_store(profile)
         )
-        token, token_source = resolve_access_token(credentials)
-    except CredentialStoreError as exc:
+        token, _token_source = resolve_access_token(credentials)
+    except CredentialStoreError:
         print(
-            f"- [FAIL] Notion credentials cannot be read: {recovery_guidance(str(exc), profile)}"
+            "- [FAIL] Notion credentials cannot be read. Check the operating-system credential store."
         )
         token = ""
-        token_source = "missing"
         ready = False
     if token:
-        print(f"- [OK] Notion token is available ({token_source}).")
+        print(
+            "- [OK] Notion token is available in the operating-system credential store."
+        )
     else:
         print("- [MISSING] A Notion personal access token has not been saved.")
         ready = False
@@ -934,9 +944,11 @@ def _run_doctor(profile: str | None = None) -> int:
         print("- [MISSING] A Notion database and PDF property are not selected.")
         ready = False
 
-    print(f"- [INFO] Settings and sync state: {get_profile_state_db_path(profile)}")
+    print("- [INFO] Settings and sync state are stored locally for this connection.")
     print("- [INFO] Notion tokens are stored in the operating-system credential store.")
-    print(f"- [INFO] Diagnostic logs: {get_profile_log_dir(profile)}")
+    print(
+        "- [INFO] Redacted diagnostic logs use the operating system's per-user log folder."
+    )
 
     if not ready:
         print(
@@ -1010,10 +1022,26 @@ def _source_shell() -> str:
 def _print_source_outcomes(
     rows: list[SyncRow], *, preview: bool, details: bool, profile: str | None
 ) -> None:
+    reasons = {
+        **_ATTENTION_REASONS,
+        "NO_PDF": "No supported local supporting files are available.",
+        "BROKEN_ATTACHMENT_PATH": "A supporting file is unavailable. Download it in Zotero and preview again.",
+        "FILE_TOO_LARGE": "A supporting file exceeds Notion's upload limit. Use a smaller file.",
+        "UPLOAD_FAILED": "A supporting file could not be uploaded. Review the current state.",
+        "STATE_SAVE_FAILED": "Files may be attached, but their history could not be saved. Existing files stay protected; run doctor before retrying.",
+        "REMOTE_PDF_CONFLICT": "Notion contains unverified supporting files. Review the field; nothing was replaced.",
+        "STALE_PREVIEW": "The files or destination changed after preview. Run the same preview again.",
+    }
     visible = rows if details else rows[:10]
     for row in visible:
-        if row.error_message:
-            reason = recovery_guidance(row.error_message, profile)
+        if row.final_status not in {Status.OK.value, Status.UNCHANGED.value}:
+            reason = recovery_guidance(
+                reasons.get(
+                    row.final_status,
+                    "The supporting file could not be processed safely. Run `noteropdf doctor`.",
+                ),
+                profile,
+            )
         elif row.final_status == Status.UNCHANGED.value:
             reason = "Already current; no upload needed."
         elif row.action_taken.startswith("upload_attach:"):
@@ -1118,6 +1146,51 @@ def _run_sources(
     return 1 if failed or result_blockers or blockers else 0
 
 
+def _command_failure(exc: Exception) -> tuple[str, str]:
+    """Select trusted guidance without echoing API, keyring, or filesystem text."""
+    safe_operations = {
+        "Create a separate Files & media property for supporting files in the connected Notion database, then run this command again.",
+        "The saved PDF field could not be verified. Run `noteropdf connect` before choosing supporting files.",
+        "Supporting files need a separate files property from PDF sync.",
+        "Use an attachment key or --clear, not both.",
+        "That parent item key is unavailable in the selected library.",
+        "That attachment does not belong to this parent item.",
+        "That attachment is not an available local PDF.",
+    }
+    if isinstance(exc, (SetupRequired, ValueError)) and str(exc) in safe_operations:
+        return str(exc), "Review the command and connection, then preview again."
+    if isinstance(exc, NotionApiError):
+        if exc.code == Status.NOTION_AUTH_ERROR.value:
+            return (
+                "Notion access failed for the saved connection.",
+                (
+                    "Run `noteropdf connect` and paste a valid personal access token "
+                    "with the Notion API capability. Confirm database edit permissions."
+                ),
+            )
+        messages = {
+            Status.NOTION_SCHEMA_ERROR.value: "The selected Notion database or files field is unavailable.",
+            Status.NOTION_RATE_LIMIT.value: "Notion is busy. Wait before retrying.",
+            Status.NOTION_NETWORK_ERROR.value: "Notion could not be reached. Check your internet connection.",
+            Status.FILE_TOO_LARGE.value: "The selected file exceeds Notion's upload limit. Use a smaller file.",
+        }
+        return (
+            messages.get(exc.code, "Notion could not complete the request safely."),
+            "Run `noteropdf doctor` to check this connection. Run `noteropdf connect` if it needs updating.",
+        )
+    if isinstance(exc, SetupRequired):
+        return "This connection needs setup.", "Run `noteropdf connect` in a terminal."
+    if isinstance(exc, CredentialStoreError):
+        return (
+            "The operating-system credential store could not be used.",
+            "Unlock or enable Keychain, Credential Manager, Secret Service, or KWallet, then run `noteropdf connect`.",
+        )
+    return (
+        "The requested operation or saved settings are invalid.",
+        "Check the command options and run `noteropdf doctor`. Run `noteropdf connect` to review saved settings.",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1127,25 +1200,25 @@ def main(argv: list[str] | None = None) -> int:
     no_color = bool(getattr(args, "no_color", False))
 
     try:
-        log_path = setup_run_logging(
+        setup_run_logging(
             get_profile_log_dir(profile),
             no_color=no_color,
             verbose=verbose,
             profile=profile,
         )
-    except OSError as exc:
+    except OSError:
         if command != "doctor":
-            print(f"[ERROR] Could not open the diagnostic log: {exc}", file=sys.stderr)
+            print(
+                "[ERROR] Could not open the diagnostic log. Check local folder permissions.",
+                file=sys.stderr,
+            )
             return 1
         print(
-            f"[WARN] The diagnostic log is unavailable; continuing doctor in the terminal: {exc}",
+            "[WARN] The diagnostic log is unavailable; continuing doctor in the terminal.",
             file=sys.stderr,
         )
-        logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
-        log_path = None
+        setup_console_logging(no_color, verbose, profile=profile)
     logger = logging.getLogger("noteropdf.cli")
-    if log_path is not None:
-        logger.debug("Diagnostic log: %s", log_path)
     started = perf_counter()
 
     try:
@@ -1183,12 +1256,9 @@ def main(argv: list[str] | None = None) -> int:
         NotionApiError,
         ValueError,
     ) as exc:
-        logger.error("%s", recovery_guidance(str(exc), profile))
-        hint = getattr(exc, "hint", None)
-        if hint:
-            logger.info("[NEXT] %s", recovery_guidance(hint, profile))
-        elif isinstance(exc, SetupRequired):
-            logger.info("[NEXT] Run `%s` in a terminal.", _connect_command(profile))
+        message, hint = _command_failure(exc)
+        logger.error("%s", recovery_guidance(message, profile))
+        logger.info("[NEXT] %s", recovery_guidance(hint, profile))
         return 2
     except (_SetupCancelled, _SetupBack):
         logger.info("Cancelled. Run connect to change your saved connection.")
@@ -1196,12 +1266,15 @@ def main(argv: list[str] | None = None) -> int:
     except (KeyboardInterrupt, EOFError):
         logger.warning("Cancelled. Any operation already completed remains in place.")
         return 130
-    except Exception as exc:
-        if verbose:
-            logger.exception("Command failed")
-        else:
-            logger.error("Command failed: %s", recovery_guidance(str(exc), profile))
-            logger.info("[NEXT] Run again with --verbose for technical details.")
+    except Exception:  # noqa: BLE001 -- keep unexpected failures inside the CLI boundary
+        logger.error("Command failed. Private exception details were withheld.")
+        logger.info(
+            "[NEXT] %s",
+            recovery_guidance(
+                "Check local files and permissions, then run `noteropdf doctor`.",
+                profile,
+            ),
+        )
         return 1
     finally:
         logger.debug("Elapsed seconds: %.2f", perf_counter() - started)

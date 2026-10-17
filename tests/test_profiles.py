@@ -182,6 +182,7 @@ def test_profile_config_reads_its_credentials_and_connection(
 def test_connect_creates_only_selected_profile(monkeypatch, isolated_paths):
     cli._save_connection(LocalSettings(notion_data_source_id="default-source"))
     monkeypatch.setattr(cli, "_stdin_interactive", lambda: True)
+    monkeypatch.setattr(cli, "_stdout_interactive", lambda: True)
     monkeypatch.setattr(
         cli, "_select_zotero_directory", lambda existing: isolated_paths / "zotero"
     )

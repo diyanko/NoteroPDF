@@ -72,8 +72,8 @@ The preview identifies the source library type and the connected Notion PDF
 field, counts uploads and unchanged items, and explains why items need attention.
 It shows up to five upload and skipped item keys by default. Run
 `noteropdf sync --details` to see every item key and outcome. Item titles, local
-file paths, and Notion page addresses stay out of this summary. Technical
-diagnostics remain available with `--verbose` and in the private local log.
+file paths, and Notion page addresses stay out of this summary. Redacted
+status diagnostics remain available with `--verbose` and in the private local log.
 
 Later runs go directly to the preview. If no interactive terminal is available, sync remains preview-only unless `--apply` is supplied and exits nonzero when uploads are pending.
 
@@ -228,7 +228,7 @@ To repair a pipx installation, run `pipx reinstall noteropdf`. For pip, use
 
 Notion personal access tokens act with your existing page permissions and can be created only by eligible full workspace members. Choose the Notion API capability, treat the token like a password, and replace it before its selected expiration date (at most one year). See Notion's [personal access token guide](https://developers.notion.com/guides/get-started/personal-access-tokens).
 
-The diagnostic log is stored in the operating system's normal per-user log folder for NoteroPDF. It can include Zotero titles, item keys, and Notion page IDs needed for troubleshooting; review it before sharing.
+The diagnostic log is stored in the operating system's normal per-user log folder for NoteroPDF. New diagnostic messages and `--verbose` output include status and timing information, but omit document titles, filenames, local paths, Notion page IDs, HTTP request details, and exception tracebacks. Doctor output also omits private paths and destination identifiers. Connection setup requires both input and output to be attached to a terminal, so redirected output cannot receive private setup choices. Existing log contents are preserved.
 
 ## Development
 

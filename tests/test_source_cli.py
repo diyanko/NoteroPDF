@@ -103,7 +103,12 @@ def test_source_result_explains_partial_failure_and_keeps_profile(
     assert "Supporting files result" in output
     assert "File updates verified:" in output
     if error:
-        assert error in output
+        expected = {
+            "STATE_SAVE_FAILED": "their history could not be saved",
+            "NOTION_NETWORK_ERROR": "Notion could not be reached",
+            "UPLOAD_FAILED": "A supporting file could not be uploaded",
+        }
+        assert expected[status] in output
         assert "noteropdf sources --profile lab --item-key PARENT01" in output
     if status == "STATE_SAVE_FAILED":
         assert "Some files may already be attached." in output
