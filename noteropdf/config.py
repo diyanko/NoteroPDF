@@ -10,6 +10,7 @@ from pathlib import Path
 from platformdirs import user_data_path, user_log_path
 
 from .auth import CredentialStore, resolve_access_token
+from .profiles import normalize_profile
 from .settings import LocalSettings, load_settings
 from .state_store import StateStore
 from .util import unescape_js_string_literal
@@ -60,6 +61,20 @@ def get_default_state_db_path() -> Path:
 
 def get_default_log_dir() -> Path:
     return user_log_path(APP_NAME, appauthor=False, ensure_exists=False)
+
+
+def get_profile_state_db_path(profile: str | None = None) -> Path:
+    profile = normalize_profile(profile)
+    default = get_default_state_db_path()
+    if profile is None:
+        return default
+    return default.parent / "profiles" / f"profile-{profile}" / default.name
+
+
+def get_profile_log_dir(profile: str | None = None) -> Path:
+    profile = normalize_profile(profile)
+    default = get_default_log_dir()
+    return default / "profiles" / f"profile-{profile}" if profile else default
 
 
 def default_zotero_data_dir_candidates() -> list[Path]:
@@ -184,8 +199,21 @@ def validate_zotero_data_dir(path: Path) -> Path:
     return path
 
 
-def load_local_settings(state_db_path: Path | None = None) -> LocalSettings:
-    db_path = state_db_path or get_default_state_db_path()
+def load_local_settings(
+    state_db_path: Path | None = None,
+    *,
+    profile: str | None = None,
+    allow_missing_profile: bool = False,
+) -> LocalSettings:
+    profile = normalize_profile(profile)
+    db_path = state_db_path or get_profile_state_db_path(profile)
+    if profile is not None and not db_path.is_file():
+        if allow_missing_profile:
+            return LocalSettings()
+        raise SetupRequired(
+            f"Profile '{profile}' has not been connected. "
+            f"Run `noteropdf connect --profile {profile}` in a terminal."
+        )
     store = StateStore(db_path, acquire_lock=False)
     try:
         return load_settings(store)
@@ -199,13 +227,16 @@ def build_app_config(
     token: str,
     token_source: str,
     state_db_path: Path | None = None,
+    profile: str | None = None,
 ) -> AppConfig:
+    profile = normalize_profile(profile)
+    connect = "noteropdf connect" + (f" --profile {profile}" if profile else "")
     if not settings.zotero_data_dir:
-        raise SetupRequired("Zotero has not been connected yet.")
+        raise SetupRequired(f"Zotero has not been connected yet. Run `{connect}`.")
     if not settings.notion_data_source_id or not settings.pdf_property_id:
-        raise SetupRequired("Notion has not been connected yet.")
+        raise SetupRequired(f"Notion has not been connected yet. Run `{connect}`.")
     if not token:
-        raise SetupRequired("Notion authorization is missing. Run `noteropdf connect`.")
+        raise SetupRequired(f"Notion authorization is missing. Run `{connect}`.")
 
     zotero_dir = validate_zotero_data_dir(Path(settings.zotero_data_dir))
     return AppConfig(
@@ -220,8 +251,8 @@ def build_app_config(
             pdf_property_id=settings.pdf_property_id,
         ),
         sync=SyncConfig(
-            state_db_path=state_db_path or get_default_state_db_path(),
-            log_dir=get_default_log_dir(),
+            state_db_path=state_db_path or get_profile_state_db_path(profile),
+            log_dir=get_profile_log_dir(profile),
         ),
         notion_token=token,
         notion_token_source=token_source,
@@ -232,13 +263,16 @@ def load_app_config(
     *,
     state_db_path: Path | None = None,
     credential_store: CredentialStore | None = None,
+    profile: str | None = None,
 ) -> AppConfig:
-    settings = load_local_settings(state_db_path)
-    credentials = credential_store or CredentialStore()
+    profile = normalize_profile(profile)
+    settings = load_local_settings(state_db_path, profile=profile)
+    credentials = credential_store or CredentialStore(profile=profile)
     token, source = resolve_access_token(credentials)
     return build_app_config(
         settings,
         token=token,
         token_source=source,
         state_db_path=state_db_path,
+        profile=profile,
     )

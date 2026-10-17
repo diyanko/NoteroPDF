@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from noteropdf.models import CandidatePdf, ZoteroItem, ZoteroLibrary
+from noteropdf.models import CandidatePdf, SyncScope, ZoteroItem, ZoteroLibrary
 from noteropdf.notion_client import (
     NotionApiError,
     NotionClient,
@@ -94,6 +94,8 @@ def _make_engine(
         )
 
     class _State:
+        get_pdf_selection = staticmethod(lambda _key: None)
+
         def __init__(self):
             self.saved = None
 
@@ -227,6 +229,8 @@ def test_sync_one_reports_state_save_failure_and_message(tmp_path: Path):
     pdf = _make_pdf(tmp_path)
 
     class _State:
+        get_pdf_selection = staticmethod(lambda _key: None)
+
         def get(self, _):
             return None
 
@@ -1022,7 +1026,9 @@ def test_sync_orchestrates_one_complete_preview_from_stable_snapshots(tmp_path: 
     )
     engine.zotero = Zotero()
     engine.notion = Notion()
-    engine.state = SimpleNamespace(get=lambda _key: None)
+    engine.state = SimpleNamespace(
+        get=lambda _key: None, get_pdf_selection=lambda _key: None
+    )
     engine._logger = SimpleNamespace(
         debug=lambda *_args, **_kwargs: None,
         warning=lambda *_args, **_kwargs: None,
@@ -1073,3 +1079,107 @@ def test_item_failure_diagnostics_stay_below_normal_console_level(tmp_path, capl
     ]
     assert private_records
     assert all(record.levelno == logging.DEBUG for record in private_records)
+
+
+def test_approval_binds_attachment_identity_even_when_two_keys_use_same_file(tmp_path):
+    pdf = replace(_make_pdf(tmp_path), attachment_key="FIRST")
+    engine, notion = _make_engine(tmp_path, pdf=pdf, preview=True)
+    engine._sync_one(_make_item())
+    actions = engine.preview_actions()
+    assert actions[0].attachment_key == "FIRST"
+    engine._apply_writes = True
+    engine._approved_actions = {"ABC123": actions[0]}
+    row = engine._sync_one(
+        _make_item(), selected_pdf=("OK", replace(pdf, attachment_key="OTHER"), None)
+    )
+    assert row.final_status == "STALE_PREVIEW"
+    assert notion.create_calls == 0
+
+
+def test_engine_reads_pdf_choice_using_library_scoped_key(tmp_path):
+    from noteropdf.models import PdfSelection
+
+    pdf = _make_pdf(tmp_path)
+    engine, _ = _make_engine(tmp_path, pdf=pdf)
+    item = replace(_make_item(), library=ZoteroLibrary(123))
+    choice = PdfSelection("CHOSEN", "storage:paper.pdf")
+    reads = []
+    engine.state.get_pdf_selection = lambda key: reads.append(key) or choice
+    selections = []
+    engine.zotero.select_candidate_pdf = lambda item, **kwargs: (
+        selections.append(kwargs) or ("OK", pdf, None)
+    )
+    engine._select_pdf(item)
+    assert reads == ["groups/123/ABC123"]
+    assert selections == [{"selection": choice}]
+
+
+@pytest.mark.parametrize("selection", ["item", "collection", "none"])
+@pytest.mark.parametrize("shared_target", [True, False])
+@pytest.mark.parametrize("apply", [False, True])
+def test_scoped_sync_keeps_full_library_ambiguity_protection(
+    tmp_path, selection, shared_target, apply
+):
+    pdf = _make_pdf(tmp_path)
+    selected = replace(_make_item(key="SELECT01"), collection_keys=("COLLECT1",))
+    outside = replace(_make_item(key="OUTSIDE1"), collection_keys=("COLLECT2",))
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[], preview=True)
+    engine.cfg.notion.data_source_id = "source"
+    selected_pdf_keys = []
+
+    def select_pdf(item):
+        selected_pdf_keys.append(item.key)
+        if item == outside:
+            return Status.NO_PDF.value, None, None
+        return Status.OK.value, pdf, None
+
+    engine.zotero = SimpleNamespace(
+        all_items=lambda: [selected, outside],
+        select_candidate_pdf=select_pdf,
+        close=lambda: None,
+    )
+    notion.resolve_property = lambda _source, property_id: SimpleNamespace(
+        id=property_id
+    )
+    notion.validate_pdf_property = lambda *_args: None
+    snapshot = engine._snapshot
+    notion.build_data_source_snapshot = lambda *_args, **_kwargs: snapshot
+    if not shared_target:
+        engine._resolve_match = lambda item: MatchResult(
+            Status.OK, "page-1" if item == selected else "other-page", None, None
+        )
+    scope = (
+        SyncScope(item_keys=(selected.key,))
+        if selection == "item"
+        else SyncScope(collection_keys=("COLLECT1",))
+        if selection == "collection"
+        else SyncScope()
+    )
+
+    # Items newly entering the scope after confirmation are not authorized.
+    rows = engine.sync(scope=scope, apply=apply, approved_actions=() if apply else None)
+
+    assert rows[0].final_status == (
+        Status.MULTIPLE_NOTION_MATCHES.value
+        if shared_target
+        else Status.STALE_PREVIEW.value
+        if apply
+        else Status.OK.value
+    )
+    assert len(engine.preview_actions()) == (0 if shared_target or apply else 1)
+    assert notion.create_calls == notion.attach_calls == 0
+    assert selected_pdf_keys == (
+        [selected.key, outside.key] if selection == "none" else [selected.key]
+    )
+    assert len(rows) == (2 if selection == "none" else 1)
+
+
+def test_invalid_scope_stops_before_notion_scan_or_uploads(tmp_path):
+    pdf = _make_pdf(tmp_path)
+    engine, notion = _make_engine(tmp_path, pdf=pdf, remote_files=[])
+    engine.zotero.all_items = lambda: [_make_item(key="SELECT01")]
+
+    with pytest.raises(ValueError, match="selected item"):
+        engine.sync(scope=SyncScope(item_keys=("SELECT01", "MISSING1")))
+
+    assert notion.create_calls == notion.attach_calls == 0

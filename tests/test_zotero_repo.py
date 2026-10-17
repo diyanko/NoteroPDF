@@ -624,3 +624,68 @@ def test_group_discovery_rejects_ambiguous_responses(monkeypatch, records, total
     with pytest.raises(RuntimeError):
         ZoteroRepository.list_libraries()
     assert session.closed
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing", "moved", "reparented", "not_pdf", "unreadable"]
+)
+def test_saved_pdf_selection_never_falls_back_to_another_pdf(tmp_path, mutation):
+    from dataclasses import replace
+
+    from noteropdf.models import PdfSelection
+
+    repo = _path_repo(storage_dir=tmp_path / "storage", data_dir=tmp_path)
+    parent = ZoteroItem(1, "ITEM", None, "", None)
+    first_path = tmp_path / "first.pdf"
+    second_path = tmp_path / "second.pdf"
+    first_path.write_bytes(b"pdf")
+    second_path.write_bytes(b"other pdf")
+    first = ZoteroAttachment(
+        1, "ITEM", "FIRST", str(first_path), "application/pdf", None
+    )
+    other = ZoteroAttachment(
+        1, "ITEM", "OTHER", str(second_path), "application/pdf", None
+    )
+    repo._api_attachments = {1: [first, other]}
+    selection = PdfSelection("FIRST", str(first_path))
+    assert repo.select_candidate_pdf(parent)[0] == "MULTIPLE_PDFS"
+    status, pdf, _ = repo.select_candidate_pdf(parent, selection=selection)
+    assert status == "OK"
+    assert pdf.attachment_key == "FIRST"
+    if mutation == "missing":
+        repo._api_attachments[1] = [other]
+    elif mutation == "moved":
+        repo._api_attachments[1][0] = replace(first, path_raw=str(second_path))
+    elif mutation == "reparented":
+        repo._api_attachments[1][0] = replace(first, parent_key="WRONG")
+    elif mutation == "not_pdf":
+        repo._api_attachments[1][0] = replace(
+            first, content_type="text/plain", path_raw="note.txt"
+        )
+        selection = PdfSelection("FIRST", "note.txt")
+    else:
+        first_path.unlink()
+    status, pdf, _ = repo.select_candidate_pdf(parent, selection=selection)
+    assert status == "INVALID_PDF_SELECTION"
+    assert pdf is None
+
+
+def test_collection_membership_comes_from_same_snapshot(tmp_path, monkeypatch):
+    record = _api_parent_record()
+    record["data"]["collections"] = ["COLLECT1", "COLLECT2"]
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse([record])])
+    repo = ZoteroRepository(tmp_path, tmp_path)
+    assert repo.all_items()[0].collection_keys == ("COLLECT1", "COLLECT2")
+    assert len(session.calls) == 1
+
+
+@pytest.mark.parametrize("collections", [None, "COLLECT1", [1], ["invalid1"], ["../x"]])
+def test_invalid_collection_membership_stops_snapshot(
+    tmp_path, monkeypatch, collections
+):
+    record = _api_parent_record()
+    record["data"]["collections"] = collections
+    session = _use_fake_local_api(monkeypatch, [_FakeResponse([record])])
+    with pytest.raises(RuntimeError, match="invalid collection membership"):
+        ZoteroRepository(tmp_path, tmp_path)
+    assert session.closed

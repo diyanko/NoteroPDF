@@ -8,6 +8,8 @@ from pathlib import Path
 from filelock import FileLock as AdvisoryFileLock
 from filelock import Timeout
 
+from .models import PdfSelection
+
 
 @dataclass(frozen=True)
 class StateRecord:
@@ -115,7 +117,35 @@ class StateStore:
             )
             """
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pdf_selections (
+                zotero_item_key TEXT PRIMARY KEY,
+                attachment_key TEXT NOT NULL,
+                path_raw TEXT NOT NULL
+            )"""
+        )
         conn.commit()
+
+    def get_pdf_selection(self, item_key: str) -> PdfSelection | None:
+        row = self._connection.execute(
+            "SELECT attachment_key, path_raw FROM pdf_selections WHERE zotero_item_key = ?",
+            (item_key,),
+        ).fetchone()
+        return PdfSelection(*row) if row is not None else None
+
+    def set_pdf_selection(self, item_key: str, selection: PdfSelection | None) -> None:
+        with self._connection as conn:
+            if selection is None:
+                conn.execute(
+                    "DELETE FROM pdf_selections WHERE zotero_item_key = ?", (item_key,)
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO pdf_selections VALUES (?, ?, ?)
+                    ON CONFLICT(zotero_item_key) DO UPDATE SET
+                    attachment_key = excluded.attachment_key, path_raw = excluded.path_raw""",
+                    (item_key, selection.attachment_key, selection.path_raw),
+                )
 
     def get_settings(self) -> dict[str, str]:
         rows = self._connection.execute("SELECT key, value FROM settings").fetchall()
