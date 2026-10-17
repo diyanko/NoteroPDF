@@ -97,7 +97,9 @@ def test_load_app_config_uses_saved_personal_access_token(monkeypatch, tmp_path:
         def load(self):
             return "personal-access-token"
 
-    monkeypatch.setattr("noteropdf.config.load_local_settings", lambda _path: settings)
+    monkeypatch.setattr(
+        "noteropdf.config.load_local_settings", lambda _path, **_kwargs: settings
+    )
 
     cfg = load_app_config(
         state_db_path=tmp_path / "state.sqlite3",
