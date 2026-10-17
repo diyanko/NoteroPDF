@@ -62,9 +62,9 @@ On the first run, NoteroPDF:
 1. Connects to Zotero and lets you choose your personal library or a locally available group library.
 2. Opens Notion's personal access token page in the browser.
 3. Asks you to create a token with the Notion API capability and paste it once. The token input is hidden.
-4. Saves the token in your operating system's credential store.
-5. Lets you choose the database managed by Notero.
-6. Finds a dedicated `NoteroPDF PDF` files property, or asks before creating it.
+4. Lets you choose the database managed by Notero.
+5. Finds a dedicated `NoteroPDF PDF` files property, or asks before creating it.
+6. Lets you review or edit the connection, then saves its settings and token in your operating system's credential store.
 7. Matches items through their exact Notero-created links and shows what will be uploaded.
 8. Uploads PDFs only after one confirmation.
 
@@ -122,9 +122,10 @@ letters, digits, or hyphens, start with a letter, and end with a letter or digit
 | `noteropdf sync --details` | Show every item key and its outcome, including unchanged items. |
 | `noteropdf sync --apply` | Preview and apply without a prompt; useful for automation. |
 | `noteropdf connect` | Choose a Zotero library, reconnect Notion, or choose a different database. |
-| `noteropdf pdf ITEM` | List available PDF attachment keys for an exact item key. |
+| `noteropdf pdf ITEM` | List available PDF attachments for an exact item key. |
 | `noteropdf pdf ITEM ATTACHMENT` | Remember the exact PDF to use for this item in the selected library. |
 | `noteropdf pdf ITEM --clear` | Forget a saved PDF choice. |
+| `noteropdf sources --item-key ITEM` | Preview supporting files for an explicitly selected paper. |
 | `noteropdf doctor` | Check Zotero, Notion, credentials, schema, and local storage. |
 | `noteropdf --version` | Show the installed version. |
 
@@ -158,7 +159,10 @@ blocks that target too.
 When an item has several PDFs, sync skips it until you explicitly choose one.
 Find the parent item and attachment keys in Zotero's item links, then run
 `noteropdf pdf ITEM` to see available local PDF attachment keys. Save your choice
-with `noteropdf pdf ITEM ATTACHMENT`, then run sync to review it. Choices stay
+with `noteropdf pdf ITEM ATTACHMENT`, then run sync to review it. Local interactive
+listings show sanitized filenames, sizes, and attachment keys so you can recognize
+the right PDF. Redirected or noninteractive output omits filenames. Full paths
+are never shown in attachment listings. Choices stay
 separate for personal and group libraries, and the selection command only changes
 local preferences. Add `--profile lab` to inspect or save choices in a named
 connection. It never uploads or changes Zotero or Notion. If the chosen
@@ -196,11 +200,23 @@ files** in the connected Notero database, then choose the papers explicitly:
 ```bash
 noteropdf sources --item-key ABCD1234
 noteropdf sources --item-key ABCD1234 --item-key EFGH5678 --files-property "Supporting files"
+noteropdf sources --profile lab --item-key ABCD1234 --details
 ```
 
 Use each parent item's eight-character Zotero key. The command previews first;
 confirm interactively or repeat the same selection with `--apply`. It reads only
-local attachments and uses the same exact Notero links as PDF sync.
+local attachments and uses the same exact Notero links as PDF sync. Use
+`--profile NAME` for a saved connection and `--details` for every file and outcome.
+The preview shows attachment keys, file types, and sizes; filenames appear only
+when both input and output are interactive terminals. Retry instructions retain
+your connection, selected papers, field, and detail preference. Windows retry
+commands are labeled for PowerShell.
+
+Results distinguish verified file updates from skipped files and failed uploads.
+If a response or local history save fails after attachment, files may already
+be present in Notion. Review the next preview before retrying; unverified
+existing files remain protected. A failure on one paper does not roll back
+updates already completed for another paper.
 
 Supported formats: PDF, XLSX, XLS, CSV, TSV, DOCX, DOC, PPTX, TXT, JSON, Markdown,
 HTML, and ZIP. Unsupported formats and web bookmarks are ignored. Multiple files

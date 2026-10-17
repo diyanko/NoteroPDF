@@ -13,6 +13,11 @@ Keep every change simple, deterministic, safe, and understandable to a non-techn
 - Never replace unknown, ambiguous, or concurrently changed Notion files.
 - Prefer actionable errors and a smaller dependency surface.
 - Never commit credentials, personal data, diagnostic logs, or generated output.
+- Keep diagnostic logs and redirected or noninteractive summaries free of research
+  titles, filenames, personal paths, page IDs, and raw API or exception payloads.
+  Interactive attachment listings may show sanitized basenames when both input
+  and output are terminals; never show directory components or terminal controls.
+  Test redirection as well as ordinary local use.
 
 The main boundaries are intentionally direct: `cli.py` guides the user, `auth.py` and `settings.py` manage the local PAT connection, `sync_engine.py` coordinates work, `notion_client.py` handles Notion, `zotero_repo.py` reads Zotero, and `state_store.py` records local state.
 

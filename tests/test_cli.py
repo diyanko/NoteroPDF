@@ -655,8 +655,11 @@ def test_parser_accepts_details_for_sync():
     assert _build_parser().parse_args(["sync", "--details"]).details is True
 
 
+@pytest.mark.parametrize(
+    "input_tty,output_tty", [(False, False), (True, False), (False, True), (True, True)]
+)
 def test_pdf_command_inspects_validates_saves_and_clears_without_notion(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, input_tty, output_tty
 ):
     from noteropdf.cli import _run_pdf
     from noteropdf.models import ZoteroAttachment, ZoteroItem
@@ -665,8 +668,10 @@ def test_pdf_command_inspects_validates_saves_and_clears_without_notion(
 
     selected_profiles = []
     state_path = tmp_path / "state.sqlite3"
-    path = tmp_path / "paper.pdf"
+    path = tmp_path / "recognizable paper.pdf"
     path.write_bytes(b"pdf")
+    monkeypatch.setattr("noteropdf.cli._stdin_interactive", lambda: input_tty)
+    monkeypatch.setattr("noteropdf.cli.sys.stdout.isatty", lambda: output_tty)
     item = ZoteroItem(1, "ITEM", "Private title", "", None, ZoteroLibrary(123))
     repo = object.__new__(ZoteroRepository)
     repo._storage_dir = tmp_path
@@ -692,6 +697,7 @@ def test_pdf_command_inspects_validates_saves_and_clears_without_notion(
     output = capsys.readouterr().out
     assert "--profile lab ITEM ATTACHMENT" in output
     assert "- PDF" in output
+    assert ("recognizable paper.pdf" in output) == (input_tty and output_tty)
     assert "Private title" not in output
     assert str(path) not in output
     assert _run_pdf("ITEM", "PDF", clear=False, profile="lab") == 0

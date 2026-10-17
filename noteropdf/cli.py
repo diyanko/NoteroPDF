@@ -637,7 +637,7 @@ def _run_pdf(
                 if status == Status.OK.value:
                     marker = " [saved]" if saved == choice else ""
                     print(
-                        f"- {att.attachment_key}: PDF, {_file_size(pdf.size) if pdf else 'size unavailable'}{marker}"
+                        f"- {att.attachment_key}: PDF, {_file_size(pdf.size) if pdf else 'size unavailable'}{_local_attachment_name(pdf.absolute_path) if pdf else ''}{marker}"
                     )
             print(
                 f"[NEXT] Run `noteropdf pdf{profile_flag} ITEM ATTACHMENT` to save an exact choice."
@@ -964,6 +964,17 @@ def _source_label(key: str) -> str:
     return label
 
 
+def _local_attachment_name(path: str) -> str:
+    """Show recognizable basenames only when both terminal streams are local."""
+    if not _stdin_interactive() or not getattr(sys.stdout, "isatty", lambda: False)():
+        return ""
+    # Handle both path conventions, including Windows paths in fixtures or imports.
+    name = re.split(r"[/\\]", path)[-1]
+    name = "".join(char if char.isprintable() else "?" for char in name)
+    name = name[:120] or "File"
+    return f" ({name})"
+
+
 def _file_size(size: int) -> str:
     value = float(size)
     for unit in ("bytes", "KB", "MB", "GB"):
@@ -1062,7 +1073,7 @@ def _run_sources(
             else "Supporting"
         )
         print(
-            f"  - {_source_label(action.zotero_item_key)}: {kind} file, {_file_size(action.pdf_size)}"
+            f"  - {_source_label(action.zotero_item_key)}: {kind} file, {_file_size(action.pdf_size)}{_local_attachment_name(action.pdf_absolute_path)}"
         )
     blockers = _blocking_issue_count(preview)
     print(f"- Issues needing attention: {blockers}")

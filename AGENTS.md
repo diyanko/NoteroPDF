@@ -27,8 +27,9 @@
   documentation-only changes, use proportionate text and link checks.
 - Never write to Zotero or weaken protection for unknown, ambiguous, or
   concurrently changed Notion data.
-- Never expose credentials, personal paths, titles, page IDs, or diagnostic
-  logs.
+- Never expose credentials, personal paths, titles, page IDs, or raw diagnostic
+  data in logs or shared output. Interactive attachment listings may show sanitized
+  basenames only when both input and output are terminals; never show full paths.
 - Never bump a release version, create or push a tag, dispatch a publishing
   workflow, or publish to PyPI or GitHub Releases unless the user explicitly
   requests that exact action. Permission to implement, commit, or push is not
