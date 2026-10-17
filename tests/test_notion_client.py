@@ -1,6 +1,33 @@
+import pytest
 import requests
 
 from noteropdf.notion_client import NotionApiError, NotionClient, NotionProperty
+
+
+@pytest.mark.parametrize("threshold", [4, 1024])
+@pytest.mark.parametrize("content_type", [None, "text/csv"])
+def test_upload_transfer_uses_explicit_mime_and_preserves_pdf_default(
+    tmp_path, monkeypatch, threshold, content_type
+):
+    client = NotionClient(token="x", notion_version="2026-03-11")
+    path = tmp_path / "data.csv"
+    path.write_bytes(b"a,b\n1,2\n")
+    monkeypatch.setattr(client, "MULTIPART_THRESHOLD_BYTES", threshold)
+    seen = []
+
+    def post(_url, **kwargs):
+        seen.append(kwargs["files"]["file"][2])
+        return _FakeResponse(200)
+
+    monkeypatch.setattr(client._session, "post", post)
+    monkeypatch.setattr(client, "complete_file_upload", lambda *_args, **_kwargs: None)
+    try:
+        kwargs = {"content_type": content_type} if content_type is not None else {}
+        client.send_file_bytes({"id": "upload-1"}, path, **kwargs)
+        assert seen
+        assert set(seen) == {content_type or "application/pdf"}
+    finally:
+        client.close()
 
 
 def test_send_file_bytes_requires_upload_id(tmp_path):

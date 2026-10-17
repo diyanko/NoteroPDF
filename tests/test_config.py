@@ -31,12 +31,14 @@ def test_validate_zotero_data_dir_requires_database_and_storage(tmp_path: Path):
         validate_zotero_data_dir(path)
 
 
-def test_build_app_config_uses_internal_ids(tmp_path: Path):
+@pytest.mark.parametrize("group_id", [None, 123])
+def test_build_app_config_uses_internal_ids(tmp_path: Path, group_id):
     zotero = _zotero_dir(tmp_path)
     settings = LocalSettings(
         zotero_data_dir=zotero,
         notion_data_source_id="source",
         pdf_property_id="pdf-id",
+        zotero_group_id=group_id,
     )
     cfg = build_app_config(
         settings,
@@ -45,6 +47,7 @@ def test_build_app_config_uses_internal_ids(tmp_path: Path):
         state_db_path=tmp_path / "state.sqlite3",
     )
     assert cfg.zotero.data_dir == zotero
+    assert cfg.zotero.group_id == group_id
     assert cfg.notion.data_source_id == "source"
     assert cfg.notion.pdf_property_id == "pdf-id"
     assert cfg.notion_token_source == "keyring"
@@ -94,7 +97,9 @@ def test_load_app_config_uses_saved_personal_access_token(monkeypatch, tmp_path:
         def load(self):
             return "personal-access-token"
 
-    monkeypatch.setattr("noteropdf.config.load_local_settings", lambda _path: settings)
+    monkeypatch.setattr(
+        "noteropdf.config.load_local_settings", lambda _path, **_kwargs: settings
+    )
 
     cfg = load_app_config(
         state_db_path=tmp_path / "state.sqlite3",

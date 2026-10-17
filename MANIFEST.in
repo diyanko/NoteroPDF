@@ -1,0 +1,2 @@
+include CHANGELOG.md CONTRIBUTING.md RELEASING.md ROADMAP.md SECURITY.md
+recursive-include scripts *.py

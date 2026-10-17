@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from pathlib import Path
 
 from filelock import FileLock as AdvisoryFileLock
 from filelock import Timeout
+
+from .models import PdfSelection
 
 
 @dataclass(frozen=True)
@@ -115,7 +118,35 @@ class StateStore:
             )
             """
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pdf_selections (
+                zotero_item_key TEXT PRIMARY KEY,
+                attachment_key TEXT NOT NULL,
+                path_raw TEXT NOT NULL
+            )"""
+        )
         conn.commit()
+
+    def get_pdf_selection(self, item_key: str) -> PdfSelection | None:
+        row = self._connection.execute(
+            "SELECT attachment_key, path_raw FROM pdf_selections WHERE zotero_item_key = ?",
+            (item_key,),
+        ).fetchone()
+        return PdfSelection(*row) if row is not None else None
+
+    def set_pdf_selection(self, item_key: str, selection: PdfSelection | None) -> None:
+        with self._connection as conn:
+            if selection is None:
+                conn.execute(
+                    "DELETE FROM pdf_selections WHERE zotero_item_key = ?", (item_key,)
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO pdf_selections VALUES (?, ?, ?)
+                    ON CONFLICT(zotero_item_key) DO UPDATE SET
+                    attachment_key = excluded.attachment_key, path_raw = excluded.path_raw""",
+                    (item_key, selection.attachment_key, selection.path_raw),
+                )
 
     def get_settings(self) -> dict[str, str]:
         rows = self._connection.execute("SELECT key, value FROM settings").fetchall()
@@ -154,6 +185,18 @@ class StateStore:
         if not row:
             return None
         return StateRecord(*row)
+
+    def get_source_manifest(self, scope: str) -> dict:
+        raw = self.get_settings().get(f"source_manifest:{scope}")
+        if raw is None:
+            return {}
+        manifest = json.loads(raw)
+        if not isinstance(manifest, dict):
+            raise TypeError("Stored supporting-file history is invalid.")
+        return manifest
+
+    def save_source_manifest(self, scope: str, manifest: dict) -> None:
+        self.update_settings({f"source_manifest:{scope}": json.dumps(manifest)})
 
     def upsert(self, rec: StateRecord) -> None:
         conn = self._connection

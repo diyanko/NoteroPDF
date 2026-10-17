@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest a small, useful improvement.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the user need and any current workaround. Use synthetic examples.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Smallest useful improvement
+      description: Explain the desired outcome and how you would verify it works.
+    validations:
+      required: true
